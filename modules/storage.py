@@ -12,7 +12,33 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from modules.config import SUBJECTS_DIR, normalize_subject_id
+from modules.config import DATA_DIR, SUBJECTS_DIR, normalize_subject_id
+
+ACTIVE_SESSION_FILE = DATA_DIR / "active_session.json"
+
+
+def save_last_active_subject(subject_id: str) -> None:
+    """Remembers the active subject across page reloads and browser sessions."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ACTIVE_SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"last_subject_id": subject_id, "updated_at": datetime.now().isoformat()}, f, indent=2)
+    except Exception:
+        pass
+
+
+def get_last_active_subject() -> Optional[str]:
+    """Retrieves the last active subject ID remembered across sessions."""
+    if ACTIVE_SESSION_FILE.exists():
+        try:
+            with open(ACTIVE_SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                sub_id = data.get("last_subject_id")
+                if sub_id and (SUBJECTS_DIR / sub_id).exists():
+                    return sub_id
+        except Exception:
+            pass
+    return None
 
 
 def get_subject_path(subject_id: str) -> Path:
@@ -27,6 +53,36 @@ def ensure_subject_dirs(subject_id: str) -> Path:
     (base / "chunks").mkdir(parents=True, exist_ok=True)
     (base / "metadata").mkdir(parents=True, exist_ok=True)
     return base
+
+
+def save_original_document(subject_id: str, filename: str, file_bytes: bytes) -> Path:
+    """
+    Persists the original uploaded document in its raw unmodified form (PDF, DOCX, TXT)
+    so it can be read and viewed permanently across page refreshes.
+    """
+    ensure_subject_dirs(subject_id)
+    doc_path = get_subject_path(subject_id) / "documents" / filename
+    with open(doc_path, "wb") as f:
+        f.write(file_bytes)
+    return doc_path
+
+
+def get_original_document_path(subject_id: str, filename: str) -> Optional[Path]:
+    """Returns path to the original document file if it exists on disk."""
+    doc_path = get_subject_path(subject_id) / "documents" / filename
+    return doc_path if doc_path.exists() else None
+
+
+def load_original_document(subject_id: str, filename: str) -> Optional[bytes]:
+    """Reads raw original file bytes from persistent disk storage."""
+    doc_path = get_original_document_path(subject_id, filename)
+    if doc_path and doc_path.exists():
+        try:
+            with open(doc_path, "rb") as f:
+                return f.read()
+        except Exception:
+            return None
+    return None
 
 
 def compute_file_hash(file_bytes: bytes) -> str:
@@ -152,6 +208,7 @@ def get_subject_stats(subject_id: str) -> Dict[str, Any]:
     registry = load_registry(subject_id)
     num_docs = len(registry.get("documents", {}))
     
+    # Count total chunks from chunk directory
     chunks_dir = get_subject_path(subject_id) / "chunks"
     total_chunks = 0
     if chunks_dir.exists():
@@ -201,6 +258,7 @@ def save_document_chunks(
     with open(chunks_path, "w", encoding="utf-8") as f:
         json.dump(chunks, f, indent=2)
 
+    # Update document registry
     registry = load_registry(subject_id)
     registry.setdefault("documents", {})[document_id] = {
         "document_id": document_id,
@@ -231,18 +289,47 @@ def load_all_subject_chunks(subject_id: str) -> List[Dict[str, Any]]:
     return all_chunks
 
 
+def load_document_chunks(subject_id: str, document_id: str) -> List[Dict[str, Any]]:
+    """Loads chunks specifically for a single document."""
+    chunk_file = get_subject_path(subject_id) / "chunks" / f"{document_id}_chunks.json"
+    if chunk_file.exists():
+        try:
+            with open(chunk_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+
 def delete_document(subject_id: str, document_id: str) -> bool:
     """
-    Removes a document and its chunks from the subject's knowledge base.
+    Permanently removes a document, its raw uploaded file, and its chunks
+    from the subject's knowledge base.
     Caller is responsible for triggering FAISS re-indexing if needed.
     """
     chunk_file = get_subject_path(subject_id) / "chunks" / f"{document_id}_chunks.json"
     if chunk_file.exists():
-        chunk_file.unlink()
+        try:
+            chunk_file.unlink()
+        except Exception:
+            pass
 
     registry = load_registry(subject_id)
+    filename = None
     if document_id in registry.get("documents", {}):
+        filename = registry["documents"][document_id].get("filename")
         del registry["documents"][document_id]
         save_registry(subject_id, registry)
-        return True
-    return False
+
+    # Also delete raw file from documents/ directory
+    if filename:
+        raw_path = get_subject_path(subject_id) / "documents" / filename
+        if raw_path.exists():
+            try:
+                raw_path.unlink()
+            except Exception:
+                pass
+
+    return True
