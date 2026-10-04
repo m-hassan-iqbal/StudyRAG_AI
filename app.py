@@ -2,11 +2,13 @@
 Subject-Aware AI University Learning Assistant
 Main Streamlit Application.
 Provides subject management, document processing, persistent FAISS indexing,
-hybrid retrieval RAG chat, deep conceptual explanations, and a 10-question timed quiz.
+hybrid retrieval RAG chat, deep conceptual explanations, a 10-question timed quiz,
+and original document reader.
 """
 
 import os
 import time
+import base64
 import streamlit as st
 from typing import List, Dict, Any, Optional
 
@@ -43,6 +45,12 @@ from modules.storage import (
     load_all_subject_chunks,
     load_registry,
     delete_document,
+    save_original_document,
+    load_original_document,
+    get_original_document_path,
+    load_document_chunks,
+    save_last_active_subject,
+    get_last_active_subject,
 )
 from modules.extractor import extract_document
 from modules.chunker import create_chunks
@@ -121,6 +129,17 @@ st.markdown("""
         margin-bottom: 0.75rem;
         border-radius: 0 0.375rem 0.375rem 0;
     }
+    .quiz-timer-box {
+        background-color: #fee2e2;
+        border: 2px solid #ef4444;
+        color: #991b1b;
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        font-size: 1.25rem;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -128,8 +147,8 @@ st.markdown("""
 # ==============================================================================
 # SESSION STATE INITIALIZATION
 # ==============================================================================
-if "selected_subject_id" not in st.session_state:
-    st.session_state.selected_subject_id = None
+if "selected_subject_id" not in st.session_state or st.session_state.selected_subject_id is None:
+    st.session_state.selected_subject_id = get_last_active_subject()
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []  # List of {"role": "...", "content": "...", "sources": [...]}
@@ -184,10 +203,12 @@ subject_dict = {s["subject_id"]: s for s in subjects}
 if subjects:
     subject_names = {s["subject_id"]: f"{s['display_name']} ({s['num_documents']} docs)" for s in subjects}
     
+    # Keep current selection valid
     current_id = st.session_state.selected_subject_id
     if current_id not in subject_names:
         current_id = subjects[0]["subject_id"]
         st.session_state.selected_subject_id = current_id
+        save_last_active_subject(current_id)
 
     selected_sub_id = st.sidebar.selectbox(
         "Current Academic Subject:",
@@ -199,6 +220,7 @@ if subjects:
 
     if selected_sub_id != st.session_state.selected_subject_id:
         st.session_state.selected_subject_id = selected_sub_id
+        save_last_active_subject(selected_sub_id)
         # Clear chat when switching subjects to maintain subject boundary purity
         st.session_state.chat_history = []
         st.session_state.last_query = ""
@@ -206,6 +228,8 @@ if subjects:
         st.session_state.last_context = ""
         st.session_state.deep_explanation = None
         st.rerun()
+    else:
+        save_last_active_subject(selected_sub_id)
 
     active_sub = subject_dict.get(st.session_state.selected_subject_id)
     if active_sub:
@@ -217,13 +241,14 @@ if subjects:
 else:
     st.sidebar.info("No subjects created yet. Create your first subject below!")
     st.session_state.selected_subject_id = None
+    save_last_active_subject("")
 
 st.sidebar.divider()
 
 # Create New Subject Form
 with st.sidebar.expander("➕ Create New Subject", expanded=(len(subjects) == 0)):
     with st.form("create_subject_form", clear_on_submit=True):
-        new_subject_name = st.text_input("Subject Name", placeholder="e.g. Professional Practices")
+        new_subject_name = st.text_input("Subject Name", placeholder="e.g. Data Structures")
         submitted = st.form_submit_button("Create Subject", use_container_width=True)
         if submitted:
             if not new_subject_name.strip():
@@ -232,6 +257,7 @@ with st.sidebar.expander("➕ Create New Subject", expanded=(len(subjects) == 0)
                 try:
                     new_id = create_subject(new_subject_name)
                     st.session_state.selected_subject_id = new_id
+                    save_last_active_subject(new_id)
                     st.success(f"Subject '{new_subject_name}' created!")
                     st.rerun()
                 except ValueError as ve:
@@ -246,6 +272,7 @@ if st.session_state.selected_subject_id:
             if st.button("Confirm Delete Subject", type="primary", use_container_width=True):
                 delete_subject(active_sub["subject_id"])
                 st.session_state.selected_subject_id = None
+                save_last_active_subject("")
                 st.session_state.chat_history = []
                 reset_quiz()
                 st.success("Subject deleted successfully.")
@@ -303,11 +330,11 @@ with col4:
 st.write("")
 
 # Navigation Tabs
-tab_kb, tab_chat, tab_quiz, tab_settings = st.tabs([
+tab_kb, tab_chat, tab_quiz, tab_read = st.tabs([
     "📚 Knowledge Base & Upload",
     "🤖 AI Study Assistant",
     "📝 Conceptual Quiz (10 MCQs)",
-    "⚙️ Settings & System"
+    "📖 Read Documents"
 ])
 
 
@@ -325,6 +352,7 @@ with tab_kb:
         st.subheader(f"📘 Subject: {sub_name}")
         st.caption("Upload lecture slides (PDF), notes (DOCX), or reading materials (TXT) to build this subject's private knowledge base.")
 
+        # Document Upload Component
         uploaded_files = st.file_uploader(
             "Choose course documents (PDF, DOCX, TXT):",
             type=["pdf", "docx", "txt"],
@@ -348,6 +376,7 @@ with tab_kb:
                             st.warning(f"File `{filename}` is empty. Skipping.")
                             continue
 
+                        # Check duplicate hash
                         file_hash = compute_file_hash(file_bytes)
                         existing_doc = is_duplicate_document(sub_id, file_hash)
                         if existing_doc:
@@ -355,6 +384,10 @@ with tab_kb:
                             skipped_count += 1
                             continue
 
+                        # Persist original file permanently to disk in its raw form
+                        save_original_document(sub_id, filename, file_bytes)
+
+                        # Extract text
                         status.write(f"🔍 Extracting structured text from `{filename}`...")
                         try:
                             extracted = extract_document(file_bytes, filename)
@@ -366,6 +399,7 @@ with tab_kb:
                             st.warning(f"No readable text could be extracted from `{filename}`.")
                             continue
 
+                        # Chunk text
                         doc_id = f"doc_{int(time.time())}_{len(filename)}"
                         status.write(f"✂️ Creating overlapping chunks for `{filename}`...")
                         chunks = create_chunks(
@@ -380,6 +414,7 @@ with tab_kb:
                             st.warning(f"No chunks created for `{filename}`.")
                             continue
 
+                        # Persist chunk JSON and registry
                         save_document_chunks(
                             subject_id=sub_id,
                             document_id=doc_id,
@@ -391,6 +426,7 @@ with tab_kb:
                         processed_count += 1
                         status.write(f"✓ `{filename}` processed into {len(chunks)} chunks.")
 
+                    # Rebuild Subject FAISS Index
                     if processed_count > 0:
                         status.write("⚡ Generating embeddings & updating subject FAISS vector index...")
                         all_chunks = load_all_subject_chunks(sub_id)
@@ -428,6 +464,7 @@ with tab_kb:
                 with c_action:
                     if st.button("Delete", key=f"del_{doc_id}", type="secondary"):
                         delete_document(sub_id, doc_id)
+                        # Rebuild FAISS index with remaining chunks
                         remaining_chunks = load_all_subject_chunks(sub_id)
                         build_and_save_index(sub_id, remaining_chunks)
                         st.success(f"Deleted {meta.get('filename')}")
@@ -448,215 +485,191 @@ with tab_chat:
         st.subheader(f"🤖 AI Study Assistant — {sub_name}")
         st.caption("Ask questions about your uploaded materials. The assistant retrieves knowledge ONLY from this subject.")
 
-        sub_stats = get_subject_stats(sub_id)
-        if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
-            st.warning(
-                f"The subject **{sub_name}** does not have any processed course documents yet. "
-                "Please upload documents in the **Knowledge Base & Upload** tab first.",
-                icon="⚠️"
-            )
+        # Check if subject has an index
+        all_chunks = load_all_subject_chunks(sub_id)
+        if not all_chunks:
+            st.warning(f"⚠️ No documents have been processed for '{sub_name}' yet.\nPlease upload course documents in the **Knowledge Base** tab first.")
+        else:
+            # Display conversation history
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+                    if msg.get("sources"):
+                        with st.expander("📚 Retrieved Source References"):
+                            for s in msg["sources"]:
+                                page_str = f", Page {s['page']}" if s.get('page') else ""
+                                st.markdown(f"""
+                                <div class="source-box">
+                                    <strong>Document:</strong> {s['filename']}{page_str}<br>
+                                    <small><strong>Score:</strong> {s['score']:.3f} | <strong>Match:</strong> {s['match_type'].capitalize()}</small><br>
+                                    <em>"{s['text_snippet']}"</em>
+                                </div>
+                                """, unsafe_allow_html=True)
 
-        for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if msg.get("sources"):
-                    with st.expander("📚 View Retrieved Sources"):
-                        for idx, src in enumerate(msg["sources"], 1):
-                            page_disp = src.get('page') if src.get('page') is not None else 'N/A'
-                            st.markdown(f"**Source {idx}:** `{src.get('filename')}` — Page: `{page_disp}`")
-                            st.caption(f"Scores: Hybrid: {src.get('hybrid_score', 0):.2f} | Semantic: {src.get('semantic_score', 0):.2f} | Keyword: {src.get('keyword_score', 0):.2f}")
-                            st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
+            # Chat input
+            user_question = st.chat_input(f"Ask a question about {sub_name}...")
 
-        user_query = st.chat_input(f"Ask a question about {sub_name}...")
-
-        if user_query:
-            if not api_key:
-                st.error("Cannot query AI: GROQ_API_KEY is not configured.")
-            elif not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
-                st.error("Please upload and process course documents before asking questions.")
-            else:
-                st.session_state.chat_history.append({"role": "user", "content": user_query})
+            if user_question:
+                # Add user query to history
+                st.session_state.chat_history.append({"role": "user", "content": user_question})
                 with st.chat_message("user"):
-                    st.markdown(user_query)
+                    st.markdown(user_question)
 
                 with st.chat_message("assistant"):
                     with st.spinner(f"Searching {sub_name} knowledge base..."):
-                        retrieved_chunks, is_confident = hybrid_search(
-                            query=user_query,
+                        # Execute hybrid search
+                        retrieved = hybrid_search(
                             subject_id=sub_id,
+                            query=user_question,
                             top_k=DEFAULT_TOP_K,
                             semantic_weight=DEFAULT_SEMANTIC_WEIGHT,
-                            keyword_weight=DEFAULT_KEYWORD_WEIGHT,
-                            confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD
+                            keyword_weight=DEFAULT_KEYWORD_WEIGHT
                         )
 
-                        context_str = build_context(retrieved_chunks)
+                        # Build formatted context
+                        context_text, sources = build_context(retrieved)
 
-                        st.session_state.last_query = user_query
-                        st.session_state.last_context = context_str
-                        st.session_state.deep_explanation = None
+                        # Save for deep explanation
+                        st.session_state.last_query = user_question
+                        st.session_state.last_context = context_text
 
-                        try:
-                            answer = generate_rag_answer(
-                                question=user_query,
-                                subject_name=sub_name,
-                                retrieved_context=context_str,
-                                is_confident=is_confident,
-                                chat_history=st.session_state.chat_history[:-1]
-                            )
-                        except Exception as e:
-                            answer = f"Error communicating with AI tutor: {str(e)}"
+                        # Generate grounded LLM response
+                        answer = generate_rag_answer(
+                            query=user_question,
+                            context=context_text,
+                            subject_name=sub_name
+                        )
 
                         st.session_state.last_answer = answer
+                        st.session_state.deep_explanation = None
+
                         st.markdown(answer)
 
-                        if retrieved_chunks and is_confident:
-                            with st.expander("📚 Sources & References"):
-                                for idx, src in enumerate(retrieved_chunks, 1):
-                                    page_info = src.get('page') if src.get('page') is not None else 'N/A'
-                                    st.markdown(f"**{idx}. {src.get('filename')}** — Page: `{page_info}`")
-                                    st.caption(
-                                        f"Relevance: Hybrid: {src.get('hybrid_score', 0):.2f} | "
-                                        f"Semantic: {src.get('semantic_score', 0):.2f} | "
-                                        f"Keyword: {src.get('keyword_score', 0):.2f}"
-                                    )
-                                    st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
+                        if sources:
+                            with st.expander("📚 Retrieved Source References"):
+                                for s in sources:
+                                    page_str = f", Page {s['page']}" if s.get('page') else ""
+                                    st.markdown(f"""
+                                    <div class="source-box">
+                                        <strong>Document:</strong> {s['filename']}{page_str}<br>
+                                        <small><strong>Score:</strong> {s['score']:.3f} | <strong>Match:</strong> {s['match_type'].capitalize()}</small><br>
+                                        <em>"{s['text_snippet']}"</em>
+                                    </div>
+                                    """, unsafe_allow_html=True)
 
                         st.session_state.chat_history.append({
                             "role": "assistant",
                             "content": answer,
-                            "sources": retrieved_chunks if is_confident else []
+                            "sources": sources
                         })
 
-        if st.session_state.last_answer and not st.session_state.last_answer.startswith("I couldn't find enough"):
-            st.divider()
-            c_exp, c_quiz, _ = st.columns([1.5, 1.5, 3])
-            
-            with c_exp:
-                if st.button("🧠 Explain Deeper", use_container_width=True):
-                    with st.spinner("Generating conceptual pedagogical breakdown..."):
-                        try:
+            # Deep Conceptual Explanation Feature
+            if st.session_state.last_answer and st.session_state.last_query:
+                st.write("")
+                st.divider()
+                col_exp1, col_exp2 = st.columns([3, 1])
+                with col_exp1:
+                    st.markdown(f"**Want a deeper breakdown of:** *\"{st.session_state.last_query}\"*?")
+                    st.caption("Expands on underlying principles, step-by-step intuition, mental models, and academic examples.")
+                with col_exp2:
+                    if st.button("🧠 Request Deep Explanation", type="secondary"):
+                        with st.spinner("Synthesizing deep conceptual tutorial..."):
                             deep_exp = generate_deep_explanation(
-                                question=st.session_state.last_query,
-                                subject_name=sub_name,
-                                retrieved_context=st.session_state.last_context,
-                                initial_answer=st.session_state.last_answer
+                                query=st.session_state.last_query,
+                                previous_answer=st.session_state.last_answer,
+                                context=st.session_state.last_context,
+                                subject_name=sub_name
                             )
                             st.session_state.deep_explanation = deep_exp
-                        except Exception as e:
-                            st.error(f"Failed to generate deep explanation: {str(e)}")
 
-            with c_quiz:
-                if st.button("📝 Test My Knowledge on this Subject", use_container_width=True):
-                    st.info("Head over to the **Conceptual Quiz (10 MCQs)** tab to start your 5-minute assessment!")
-
-            if st.session_state.deep_explanation:
-                st.markdown("### 🧠 In-Depth Conceptual Explanation")
-                st.markdown(st.session_state.deep_explanation)
+                if st.session_state.deep_explanation:
+                    st.info(f"### 💡 In-Depth Conceptual Explanation\n\n{st.session_state.deep_explanation}")
 
 
 # ==============================================================================
-# TAB 3: TIMED CONCEPTUAL MCQ QUIZ (10 QUESTIONS | 10 MARKS | 5 MINUTES)
+# TAB 3: CONCEPTUAL MCQ QUIZ (10 QUESTIONS WITH LIVE TIMER & FEEDBACK)
 # ==============================================================================
 with tab_quiz:
     if not st.session_state.selected_subject_id:
-        st.info("👈 Please create or select an academic subject in the sidebar to start a quiz.")
+        st.info("👈 Please create or select an academic subject in the sidebar to generate a quiz.")
     else:
         current_sub = subject_dict.get(st.session_state.selected_subject_id)
         sub_name = current_sub["display_name"]
         sub_id = current_sub["subject_id"]
-        sub_stats = get_subject_stats(sub_id)
 
         st.subheader(f"📝 Timed Conceptual Quiz — {sub_name}")
-        st.markdown("""
-        **Format:**
-        * **10 Real-World & Conceptual Questions** (Multiple Choice)
-        * **10 Marks** (1 mark per question — Score out of 10)
-        * **5 Minutes** fixed countdown timer
-        * **Deep Conceptual Understanding:** Scenario-based questions that test practical trade-offs, analytical problem-solving, and in-depth mastery of your course material.
-        """)
+        st.caption("10 challenging conceptual MCQs grounded strictly in your uploaded course materials.")
 
-        if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
-            st.warning("Please upload course documents before generating a quiz.", icon="⚠️")
+        all_chunks = load_all_subject_chunks(sub_id)
+        if not all_chunks:
+            st.warning(f"⚠️ No documents have been processed for '{sub_name}' yet.\nPlease upload lecture materials first to generate a quiz.")
         else:
-            # Quiz is NOT currently active and not yet submitted
+            # Quiz is NOT active and NOT submitted: Show Quiz Generation Screen
             if not st.session_state.quiz_active and not st.session_state.quiz_submitted:
-                if st.button("🚀 Start 5-Minute Quiz", type="primary"):
-                    if not api_key:
-                        st.error("Cannot generate quiz: GROQ_API_KEY is not configured.")
-                    else:
-                        with st.spinner(f"Synthesizing 10 real-world conceptual MCQs from {sub_name} materials..."):
-                            all_chunks = load_all_subject_chunks(sub_id)
-                            sample_text = "\n\n".join([f"Topic excerpt from {c['filename']}:\n{c['text']}" for c in all_chunks[:15]])
-                            
-                            try:
-                                questions = generate_quiz(subject_name=sub_name, subject_context=sample_text)
-                                start_quiz(sub_id, sub_name, questions)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error generating quiz: {str(e)}")
+                st.markdown(f"""
+                ### Quiz Details:
+                * **Subject:** `{sub_name}`
+                * **Question Count:** `10 Multiple Choice Questions (MCQs)`
+                * **Time Limit:** `5 Minutes` (300 seconds)
+                * **Format:** Real-world problem scenarios, algorithmic trade-offs, and conceptual mastery.
+                """)
 
-            # Quiz IS currently active (Timer ticking live)
+                if st.button("🚀 Generate & Start 10-Question Quiz", type="primary"):
+                    with st.spinner("Reading course documents and crafting 10 deep conceptual questions..."):
+                        quiz_data = generate_quiz(
+                            chunks=all_chunks,
+                            subject_name=sub_name,
+                            num_questions=QUIZ_QUESTION_COUNT
+                        )
+
+                        if quiz_data and "questions" in quiz_data and len(quiz_data["questions"]) > 0:
+                            start_quiz(quiz_data["questions"])
+                            st.rerun()
+                        else:
+                            st.error("Failed to generate quiz questions. Please verify your Groq API key and course documents.")
+
+            # Quiz IS ACTIVE: Show Timer & Question Form
             elif st.session_state.quiz_active and not st.session_state.quiz_submitted:
-                remaining_sec = get_remaining_seconds()
+                rem_sec = get_remaining_seconds()
 
-                if remaining_sec <= 0:
-                    st.warning("⏰ Time is up! Automatically submitting your answers.")
+                # JavaScript Live Countdown Timer
+                timer_html = f"""
+                <div style="background-color: #fee2e2; border: 2px solid #ef4444; border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 12px; font-family: monospace;">
+                    <span style="font-size: 16px; font-weight: bold; color: #991b1b;">⏱️ REMAINING TIME: </span>
+                    <span id="countdown_clock" style="font-size: 24px; font-weight: 800; color: #dc2626;">{format_remaining_time(rem_sec)}</span>
+                </div>
+                <script>
+                    var secondsLeft = {rem_sec};
+                    var clockEl = document.getElementById("countdown_clock");
+                    var countdownInterval = setInterval(function() {{
+                        secondsLeft--;
+                        if (secondsLeft <= 0) {{
+                            clearInterval(countdownInterval);
+                            clockEl.innerText = "00:00 (TIME EXPIRED)";
+                            clockEl.style.color = "#7f1d1d";
+                            window.parent.postMessage({{type: "streamlit:setComponentValue", value: "timeout"}}, "*");
+                        }} else {{
+                            var mins = Math.floor(secondsLeft / 60);
+                            var secs = secondsLeft % 60;
+                            clockEl.innerText = (mins < 10 ? "0" : "") + mins + ":" + (secs < 10 ? "0" : "") + secs;
+                        }}
+                    }}, 1000);
+                </script>
+                """
+                components.html(timer_html, height=75)
+
+                if rem_sec <= 0:
+                    st.warning("⚠️ Time has expired! Submitting your answers automatically...")
                     submit_quiz()
                     st.rerun()
                 else:
-                    col_time, col_reset = st.columns([3, 1])
-                    with col_time:
-                        timer_component = f"""
-                        <div style="background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-                                    border: 2px solid #ef4444; color: #991b1b; padding: 10px 16px;
-                                    border-radius: 8px; font-size: 20px; font-weight: 800; text-align: center;
-                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                                    box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
-                            ⏱ <span id="countdown">{format_remaining_time(remaining_sec)}</span> remaining
-                        </div>
-                        <script>
-                            var secondsLeft = {remaining_sec};
-                            var timerDisplay = document.getElementById("countdown");
-                            function updateTimer() {{
-                                if (secondsLeft <= 0) {{
-                                    timerDisplay.innerText = "00:00 (TIME UP!)";
-                                    timerDisplay.style.color = "#7f1d1d";
-                                    try {{
-                                        var btns = window.parent.document.querySelectorAll('button');
-                                        for (var i = 0; i < btns.length; i++) {{
-                                            if (btns[i].innerText && btns[i].innerText.includes("Submit Quiz")) {{
-                                                btns[i].click();
-                                                break;
-                                            }}
-                                        }}
-                                    }} catch(e) {{}}
-                                    return;
-                                }}
-                                var m = Math.floor(secondsLeft / 60);
-                                var s = secondsLeft % 60;
-                                timerDisplay.innerText = (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
-                                secondsLeft--;
-                            }}
-                            updateTimer();
-                            setInterval(updateTimer, 1000);
-                        </script>
-                        """
-                        components.html(timer_component, height=60)
-                    with col_reset:
-                        if st.button("Cancel Quiz", use_container_width=True):
-                            reset_quiz()
-                            st.rerun()
+                    st.progress((300 - rem_sec) / 300)
 
-                    # Render questions
-                    questions = st.session_state.quiz_questions
-                    
-                    with st.form("quiz_form"):
-                        for idx, q in enumerate(questions):
-                            st.markdown(f"**Question {idx+1} of 10**")
-                            st.markdown(f"**{q['question']}**")
-
-                            opts = q["options"]
+                    with st.form("quiz_submission_form"):
+                        for idx, q in enumerate(st.session_state.quiz_questions):
+                            st.markdown(f"#### Question {idx+1}: {q.get('question')}")
+                            opts = q.get("options", {})
+                            
                             choice_labels = [
                                 f"A) {opts.get('A', '')}",
                                 f"B) {opts.get('B', '')}",
@@ -680,7 +693,7 @@ with tab_quiz:
                             )
 
                             if selected_label:
-                                letter = selected_label[0]
+                                letter = selected_label[0]  # 'A', 'B', 'C', or 'D'
                                 st.session_state.quiz_user_answers[idx] = letter
 
                             st.write("")
@@ -721,7 +734,6 @@ with tab_quiz:
                 else:
                     st.success("🎉 Perfect score! You demonstrated mastery of all tested concepts.")
 
-                # Detailed Solutions Breakdown
                 st.subheader("📋 Detailed Question Breakdown & Solutions")
                 for item in detailed:
                     status_icon = "✅" if item["is_correct"] else "❌"
@@ -757,44 +769,179 @@ with tab_quiz:
 
 
 # ==============================================================================
-# TAB 4: SETTINGS & SYSTEM STATUS
+# TAB 4: READ DOCUMENTS (ORIGINAL FORM VIEWER & MEMORY)
 # ==============================================================================
-with tab_settings:
-    st.subheader("⚙️ System Configuration & Diagnostics")
-    
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        st.markdown("### 🤖 Groq LLM Configuration")
-        curr_model = get_groq_model()
-        st.text_input("Active Groq Model", value=curr_model, disabled=True)
-        st.caption("Change by setting `GROQ_MODEL` in `.streamlit/secrets.toml` or OS environment.")
-        
-        has_key = bool(get_groq_api_key())
-        st.markdown(f"**API Key Present:** {'✅ Yes' if has_key else '❌ No'}")
+with tab_read:
+    if not st.session_state.selected_subject_id:
+        st.info("👈 Please select or create an academic subject in the sidebar to read its documents.")
+    else:
+        current_sub = subject_dict.get(st.session_state.selected_subject_id)
+        sub_name = current_sub["display_name"]
+        sub_id = current_sub["subject_id"]
 
-    with col_s2:
-        st.markdown("### 🔍 Retrieval & Chunking Parameters")
-        st.markdown(f"* **Embedding Model:** `{DEFAULT_EMBEDDING_MODEL}` (Sentence Transformers)")
-        st.markdown(f"* **Chunk Size:** `{DEFAULT_CHUNK_SIZE}` characters")
-        st.markdown(f"* **Chunk Overlap:** `{DEFAULT_CHUNK_OVERLAP}` characters")
-        st.markdown(f"* **Hybrid Weights:** `{int(DEFAULT_SEMANTIC_WEIGHT*100)}% Semantic` / `{int(DEFAULT_KEYWORD_WEIGHT*100)}% Keyword`")
-        st.markdown(f"* **Confidence Threshold:** `{DEFAULT_CONFIDENCE_THRESHOLD}`")
+        st.subheader(f"📖 Read Documents — {sub_name}")
+        st.caption("Read and study your course materials in their original form (PDF, DOCX, TXT). Uploaded documents and chunks are permanently preserved across refreshes.")
 
-    st.divider()
-    st.markdown("### 📁 Persistent Storage Architecture")
-    st.code("""
-data/
-└── subjects/
-    ├── <subject_id_1>/
-    │   ├── subject_info.json
-    │   ├── documents/
-    │   ├── chunks/
-    │   │   ├── doc_xxx_chunks.json
-    │   │   └── doc_yyy_chunks.json
-    │   ├── metadata/
-    │   │   ├── documents_registry.json
-    │   │   └── index_map.json
-    │   └── index.faiss
-    └── <subject_id_2>/
-        └── ...
-    """, language="text")
+        registry = load_registry(sub_id)
+        docs = registry.get("documents", {})
+
+        if not docs:
+            st.info(f"No documents uploaded yet for **{sub_name}**. Please go to the **'📚 Knowledge Base & Upload'** tab to upload course material.")
+        else:
+            doc_options = {doc_id: f"{meta.get('filename', doc_id)} ({meta.get('num_chunks', 0)} chunks)" for doc_id, meta in docs.items()}
+            
+            selected_doc_id = st.selectbox(
+                "Select a document to read:",
+                options=list(doc_options.keys()),
+                format_func=lambda x: doc_options[x],
+                key="read_doc_selector"
+            )
+
+            selected_meta = docs.get(selected_doc_id, {})
+            filename = selected_meta.get("filename", "")
+            ext = os.path.splitext(filename)[1].lower()
+
+            # Metadata Bar
+            raw_bytes = load_original_document(sub_id, filename)
+            size_str = "N/A"
+            if raw_bytes:
+                size_kb = len(raw_bytes) / 1024
+                if size_kb >= 1024:
+                    size_str = f"{size_kb / 1024:.2f} MB"
+                else:
+                    size_str = f"{size_kb:.1f} KB"
+
+            ts = selected_meta.get('processed_at', '')[:16].replace('T', ' ')
+
+            c_info1, c_info2, c_info3, c_del = st.columns([3, 2, 2, 2])
+            with c_info1:
+                st.markdown(f"📄 **File:** `{filename}`")
+            with c_info2:
+                st.markdown(f"🧩 **Chunks:** `{selected_meta.get('num_chunks', 0)}`")
+            with c_info3:
+                st.markdown(f"💾 **Size:** `{size_str}`")
+            with c_del:
+                if st.button("🗑️ Delete Permanently", key=f"perm_del_{selected_doc_id}", type="secondary", use_container_width=True):
+                    delete_document(sub_id, selected_doc_id)
+                    rem_chunks = load_all_subject_chunks(sub_id)
+                    build_and_save_index(sub_id, rem_chunks)
+                    st.success(f"Permanently deleted `{filename}` and updated vector index.")
+                    st.rerun()
+
+            st.divider()
+
+            # --- 1. PDF VIEWER (ORIGINAL FORM) ---
+            if ext == ".pdf":
+                if raw_bytes:
+                    c_btn, _ = st.columns([2, 5])
+                    with c_btn:
+                        st.download_button(
+                            label="📥 Download Original PDF",
+                            data=raw_bytes,
+                            file_name=filename,
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                    st.write("")
+                    
+                    # Embedded PDF viewer using Base64 iframe
+                    b64_pdf = base64.b64encode(raw_bytes).decode('utf-8')
+                    pdf_display = f'''
+                    <div style="border: 2px solid #cbd5e1; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                        <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" width="100%" height="800px" type="application/pdf">
+                            <p>Your browser does not support inline PDF viewing. Please use the download button above.</p>
+                        </iframe>
+                    </div>
+                    '''
+                    st.markdown(pdf_display, unsafe_allow_html=True)
+
+                    # Also provide expandable page-by-page view for convenience
+                    with st.expander("📑 Structured Text View (Page by Page)", expanded=False):
+                        chunks = load_document_chunks(sub_id, selected_doc_id)
+                        if chunks:
+                            current_page = None
+                            page_text_acc = []
+                            for c in chunks:
+                                p = c.get('page')
+                                if p != current_page and page_text_acc:
+                                    p_label = f"Page {current_page}" if current_page else "General Content"
+                                    st.markdown(f"#### 📄 {p_label}")
+                                    st.markdown("\n\n".join(page_text_acc))
+                                    st.divider()
+                                    page_text_acc = []
+                                current_page = p
+                                page_text_acc.append(c.get('text', ''))
+                            if page_text_acc:
+                                p_label = f"Page {current_page}" if current_page else "General Content"
+                                st.markdown(f"#### 📄 {p_label}")
+                                st.markdown("\n\n".join(page_text_acc))
+                        else:
+                            st.caption("No chunks available.")
+                else:
+                    st.warning("Original raw PDF is not on disk. Displaying preserved chunk text:")
+                    chunks = load_document_chunks(sub_id, selected_doc_id)
+                    for c in chunks:
+                        st.markdown(f"**Chunk {c.get('chunk_index', 0)+1}:**")
+                        st.write(c.get('text', ''))
+
+            # --- 2. DOCX VIEWER (ORIGINAL FORM) ---
+            elif ext in [".docx", ".doc"]:
+                if raw_bytes:
+                    c_btn, _ = st.columns([2, 5])
+                    with c_btn:
+                        st.download_button(
+                            label="📥 Download Original DOCX",
+                            data=raw_bytes,
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True
+                        )
+                    st.write("")
+
+                    # Extract full original document text
+                    try:
+                        extracted = extract_document(raw_bytes, filename)
+                        full_docx_text = "\n\n".join([page_info["text"] for page_info in extracted])
+                        st.markdown("""
+                        <div style="background-color: #ffffff; border: 2px solid #cbd5e1; border-radius: 8px; padding: 2rem; max-height: 800px; overflow-y: auto; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                        """ + full_docx_text.replace('\n', '<br>') + """
+                        </div>
+                        """, unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Error reading DOCX: {e}")
+                else:
+                    st.warning("Original raw file is not on disk. Displaying preserved chunk text:")
+                    chunks = load_document_chunks(sub_id, selected_doc_id)
+                    for c in chunks:
+                        st.write(c.get('text', ''))
+
+            # --- 3. TXT VIEWER (ORIGINAL FORM) ---
+            elif ext == ".txt":
+                if raw_bytes:
+                    c_btn, _ = st.columns([2, 5])
+                    with c_btn:
+                        st.download_button(
+                            label="📥 Download Original TXT",
+                            data=raw_bytes,
+                            file_name=filename,
+                            mime="text/plain",
+                            use_container_width=True
+                        )
+                    st.write("")
+                    try:
+                        txt_content = raw_bytes.decode('utf-8', errors='replace')
+                    except Exception:
+                        txt_content = str(raw_bytes)
+                    st.text_area("Original Document Text", value=txt_content, height=700, disabled=True)
+                else:
+                    st.warning("Original raw file is not on disk. Displaying preserved chunk text:")
+                    chunks = load_document_chunks(sub_id, selected_doc_id)
+                    full_txt = "\n\n".join([c.get('text', '') for c in chunks])
+                    st.text_area("Preserved Document Text", value=full_txt, height=700, disabled=True)
+
+            else:
+                if raw_bytes:
+                    st.download_button("📥 Download File", data=raw_bytes, file_name=filename)
+                chunks = load_document_chunks(sub_id, selected_doc_id)
+                for c in chunks:
+                    st.write(c.get('text', ''))
