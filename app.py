@@ -10,6 +10,7 @@ import time
 import streamlit as st
 from typing import List, Dict, Any, Optional
 
+# Set page layout first
 st.set_page_config(
     page_title="AI University Learning Assistant",
     page_icon="🎓",
@@ -17,6 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Import internal modules
 from modules.config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_CHUNK_SIZE,
@@ -63,9 +65,15 @@ from modules.quiz_engine import (
     reset_quiz,
     get_remaining_seconds,
     format_remaining_time,
+    calculate_quiz_results,
     submit_quiz,
 )
+import streamlit.components.v1 as components
 
+
+# ==============================================================================
+# CUSTOM STYLING
+# ==============================================================================
 st.markdown("""
 <style>
     .main-header {
@@ -106,25 +114,25 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
-    .quiz-timer-box {
-        background-color: #fee2e2;
-        border: 2px solid #ef4444;
-        color: #991b1b;
-        padding: 0.75rem;
-        border-radius: 0.5rem;
-        font-size: 1.25rem;
-        font-weight: 700;
-        text-align: center;
-        margin-bottom: 1rem;
+    .source-box {
+        background-color: #f1f5f9;
+        border-left: 4px solid #3b82f6;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.75rem;
+        border-radius: 0 0.375rem 0.375rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
+
+# ==============================================================================
+# SESSION STATE INITIALIZATION
+# ==============================================================================
 if "selected_subject_id" not in st.session_state:
     st.session_state.selected_subject_id = None
 
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []  # List of {"role": "...", "content": "...", "sources": [...]}
 
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
@@ -138,8 +146,11 @@ if "last_context" not in st.session_state:
 if "deep_explanation" not in st.session_state:
     st.session_state.deep_explanation = None
 
+# Initialize quiz state
 init_quiz_session_state()
 
+
+# Pre-warm embedding model once in cache
 @st.cache_resource(show_spinner="Loading embedding model (all-MiniLM-L6-v2)...")
 def load_cached_embedding_model():
     return get_embedding_model()
@@ -149,8 +160,13 @@ try:
 except Exception as e:
     st.sidebar.error(f"Warning: Embedding model initialization error: {e}")
 
+
+# ==============================================================================
+# SIDEBAR: SUBJECT SELECTION & MANAGEMENT
+# ==============================================================================
 st.sidebar.title("📚 Subject Management")
 
+# API Key check
 api_key = get_groq_api_key()
 if api_key:
     st.sidebar.success("🔑 Groq API Key: Active", icon="✅")
@@ -160,11 +176,14 @@ else:
         icon="⚠️"
     )
 
+# List all subjects
 subjects = list_subjects()
 subject_dict = {s["subject_id"]: s for s in subjects}
 
+# Subject selection dropdown
 if subjects:
     subject_names = {s["subject_id"]: f"{s['display_name']} ({s['num_documents']} docs)" for s in subjects}
+    
     current_id = st.session_state.selected_subject_id
     if current_id not in subject_names:
         current_id = subjects[0]["subject_id"]
@@ -180,6 +199,7 @@ if subjects:
 
     if selected_sub_id != st.session_state.selected_subject_id:
         st.session_state.selected_subject_id = selected_sub_id
+        # Clear chat when switching subjects to maintain subject boundary purity
         st.session_state.chat_history = []
         st.session_state.last_query = ""
         st.session_state.last_answer = ""
@@ -200,6 +220,7 @@ else:
 
 st.sidebar.divider()
 
+# Create New Subject Form
 with st.sidebar.expander("➕ Create New Subject", expanded=(len(subjects) == 0)):
     with st.form("create_subject_form", clear_on_submit=True):
         new_subject_name = st.text_input("Subject Name", placeholder="e.g. Professional Practices")
@@ -216,6 +237,7 @@ with st.sidebar.expander("➕ Create New Subject", expanded=(len(subjects) == 0)
                 except ValueError as ve:
                     st.error(str(ve))
 
+# Delete Subject Form
 if st.session_state.selected_subject_id:
     active_sub = subject_dict.get(st.session_state.selected_subject_id)
     with st.sidebar.expander("🗑️ Delete Current Subject"):
@@ -229,6 +251,10 @@ if st.session_state.selected_subject_id:
                 st.success("Subject deleted successfully.")
                 st.rerun()
 
+
+# ==============================================================================
+# MAIN PAGE HEADER & STATS
+# ==============================================================================
 st.markdown("""
 <div class="main-header">
     <h1>🎓 AI University Learning Assistant</h1>
@@ -236,6 +262,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Overview Dashboard Metrics
 global_stats = get_global_stats()
 active_sub_name = "None"
 if st.session_state.selected_subject_id:
@@ -275,6 +302,7 @@ with col4:
 
 st.write("")
 
+# Navigation Tabs
 tab_kb, tab_chat, tab_quiz, tab_settings = st.tabs([
     "📚 Knowledge Base & Upload",
     "🤖 AI Study Assistant",
@@ -282,7 +310,10 @@ tab_kb, tab_chat, tab_quiz, tab_settings = st.tabs([
     "⚙️ Settings & System"
 ])
 
-# Tab 1: Knowledge Base
+
+# ==============================================================================
+# TAB 1: KNOWLEDGE BASE & DOCUMENT PROCESSING
+# ==============================================================================
 with tab_kb:
     if not st.session_state.selected_subject_id:
         st.info("👈 Please create or select an academic subject in the sidebar to begin.")
@@ -377,6 +408,7 @@ with tab_kb:
 
         st.divider()
 
+        # Existing Documents Section
         st.subheader("📑 Documents in this Subject")
         registry = load_registry(sub_id)
         docs = registry.get("documents", {})
@@ -401,7 +433,10 @@ with tab_kb:
                         st.success(f"Deleted {meta.get('filename')}")
                         st.rerun()
 
-# Tab 2: AI Study Assistant
+
+# ==============================================================================
+# TAB 2: AI STUDY ASSISTANT (SUBJECT-AWARE RAG CHAT)
+# ==============================================================================
 with tab_chat:
     if not st.session_state.selected_subject_id:
         st.info("👈 Please create or select an academic subject in the sidebar to ask questions.")
@@ -519,7 +554,10 @@ with tab_chat:
                 st.markdown("### 🧠 In-Depth Conceptual Explanation")
                 st.markdown(st.session_state.deep_explanation)
 
-# Tab 3: Timed Conceptual Quiz (10 MCQs | 5-Minute Timer)
+
+# ==============================================================================
+# TAB 3: TIMED CONCEPTUAL MCQ QUIZ (10 QUESTIONS | 10 MARKS | 5 MINUTES)
+# ==============================================================================
 with tab_quiz:
     if not st.session_state.selected_subject_id:
         st.info("👈 Please create or select an academic subject in the sidebar to start a quiz.")
@@ -541,6 +579,7 @@ with tab_quiz:
         if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
             st.warning("Please upload course documents before generating a quiz.", icon="⚠️")
         else:
+            # Quiz is NOT currently active and not yet submitted
             if not st.session_state.quiz_active and not st.session_state.quiz_submitted:
                 if st.button("🚀 Start 5-Minute Quiz", type="primary"):
                     if not api_key:
@@ -557,6 +596,7 @@ with tab_quiz:
                             except Exception as e:
                                 st.error(f"Error generating quiz: {str(e)}")
 
+            # Quiz IS currently active (Timer ticking live)
             elif st.session_state.quiz_active and not st.session_state.quiz_submitted:
                 remaining_sec = get_remaining_seconds()
 
@@ -567,15 +607,48 @@ with tab_quiz:
                 else:
                     col_time, col_reset = st.columns([3, 1])
                     with col_time:
-                        st.markdown(
-                            f'<div class="quiz-timer-box">⏱ {format_remaining_time(remaining_sec)} remaining</div>',
-                            unsafe_allow_html=True
-                        )
+                        timer_component = f"""
+                        <div style="background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+                                    border: 2px solid #ef4444; color: #991b1b; padding: 10px 16px;
+                                    border-radius: 8px; font-size: 20px; font-weight: 800; text-align: center;
+                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                                    box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
+                            ⏱ <span id="countdown">{format_remaining_time(remaining_sec)}</span> remaining
+                        </div>
+                        <script>
+                            var secondsLeft = {remaining_sec};
+                            var timerDisplay = document.getElementById("countdown");
+                            function updateTimer() {{
+                                if (secondsLeft <= 0) {{
+                                    timerDisplay.innerText = "00:00 (TIME UP!)";
+                                    timerDisplay.style.color = "#7f1d1d";
+                                    try {{
+                                        var btns = window.parent.document.querySelectorAll('button');
+                                        for (var i = 0; i < btns.length; i++) {{
+                                            if (btns[i].innerText && btns[i].innerText.includes("Submit Quiz")) {{
+                                                btns[i].click();
+                                                break;
+                                            }}
+                                        }}
+                                    }} catch(e) {{}}
+                                    return;
+                                }}
+                                var m = Math.floor(secondsLeft / 60);
+                                var s = secondsLeft % 60;
+                                timerDisplay.innerText = (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+                                secondsLeft--;
+                            }}
+                            updateTimer();
+                            setInterval(updateTimer, 1000);
+                        </script>
+                        """
+                        components.html(timer_component, height=60)
                     with col_reset:
-                        if st.button("Cancel Quiz"):
+                        if st.button("Cancel Quiz", use_container_width=True):
                             reset_quiz()
                             st.rerun()
 
+                    # Render questions
                     questions = st.session_state.quiz_questions
                     
                     with st.form("quiz_form"):
@@ -617,6 +690,7 @@ with tab_quiz:
                             submit_quiz()
                             st.rerun()
 
+            # Quiz HAS been submitted: Show Results & Detailed Feedback
             elif st.session_state.quiz_submitted:
                 score, total, topics, detailed = calculate_quiz_results()
                 pct = int((score / total) * 100) if total > 0 else 0
@@ -637,6 +711,7 @@ with tab_quiz:
                 </div>
                 """, unsafe_allow_html=True)
 
+                # Recommended Review Topics
                 if topics:
                     st.subheader("🎯 Recommended Review Topics")
                     st.write("Focus on revising the following concepts from your course documents:")
@@ -646,6 +721,7 @@ with tab_quiz:
                 else:
                     st.success("🎉 Perfect score! You demonstrated mastery of all tested concepts.")
 
+                # Detailed Solutions Breakdown
                 st.subheader("📋 Detailed Question Breakdown & Solutions")
                 for item in detailed:
                     status_icon = "✅" if item["is_correct"] else "❌"
@@ -679,7 +755,10 @@ with tab_quiz:
                     reset_quiz()
                     st.rerun()
 
-# Tab 4: Settings & Diagnostics
+
+# ==============================================================================
+# TAB 4: SETTINGS & SYSTEM STATUS
+# ==============================================================================
 with tab_settings:
     st.subheader("⚙️ System Configuration & Diagnostics")
     
