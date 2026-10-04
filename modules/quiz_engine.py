@@ -1,6 +1,6 @@
 """
 Quiz Engine & Assessment Module.
-Manages quiz state, session persistence, resilient 10-minute timer calculation,
+Manages quiz state, session persistence, resilient 5-minute timer calculation,
 auto-submission, scoring, and post-quiz conceptual review recommendations.
 """
 
@@ -35,13 +35,59 @@ def init_quiz_session_state() -> None:
         st.session_state.quiz_feedback = []
 
 
-def start_quiz(subject_id: str, subject_name: str, questions: List[Dict[str, Any]]) -> None:
-    """Initializes and starts a new 10-question timed quiz."""
+def start_quiz(*args, **kwargs) -> None:
+    """
+    Initializes and starts a new timed quiz.
+    Supports all call signatures:
+      - start_quiz(quiz_data["questions"])
+      - start_quiz(questions)
+      - start_quiz(quiz_data)
+      - start_quiz(subject_id, subject_name, questions)
+      - start_quiz(questions=..., subject_id=..., subject_name=...)
+    """
+    sub_id = kwargs.get("subject_id") or st.session_state.get("selected_subject_id") or ""
+    sub_name = kwargs.get("subject_name") or st.session_state.get("quiz_subject_name") or ""
+    questions = kwargs.get("questions", [])
+
+    if len(args) == 1:
+        arg = args[0]
+        if isinstance(arg, dict) and "questions" in arg:
+            questions = arg["questions"]
+        else:
+            questions = arg
+    elif len(args) == 2:
+        if isinstance(args[0], (list, tuple)):
+            questions, sub_id = args[0], args[1]
+        else:
+            sub_id, questions = args[0], args[1]
+    elif len(args) >= 3:
+        if isinstance(args[0], (list, tuple)):
+            questions, sub_id, sub_name = args[0], args[1], args[2]
+        else:
+            sub_id, sub_name, questions = args[0], args[1], args[2]
+
+    # Handle if questions is a dict containing 'questions' key
+    if isinstance(questions, dict) and "questions" in questions:
+        questions = questions["questions"]
+
+    if not isinstance(questions, (list, tuple)):
+        questions = []
+
+    # Infer subject display name if not yet populated
+    if sub_id and not sub_name:
+        try:
+            from modules.storage import get_subject_info
+            info = get_subject_info(sub_id)
+            if info:
+                sub_name = info.get("display_name", sub_id)
+        except Exception:
+            sub_name = str(sub_id)
+
     st.session_state.quiz_active = True
-    st.session_state.quiz_subject_id = subject_id
-    st.session_state.quiz_subject_name = subject_name
-    st.session_state.quiz_questions = questions[:QUIZ_QUESTION_COUNT]
-    st.session_state.quiz_user_answers = {i: None for i in range(len(questions[:QUIZ_QUESTION_COUNT]))}
+    st.session_state.quiz_subject_id = sub_id
+    st.session_state.quiz_subject_name = sub_name
+    st.session_state.quiz_questions = list(questions)[:QUIZ_QUESTION_COUNT]
+    st.session_state.quiz_user_answers = {i: None for i in range(len(st.session_state.quiz_questions))}
     st.session_state.quiz_start_time = time.time()
     st.session_state.quiz_duration = QUIZ_TIME_LIMIT_SECONDS
     st.session_state.quiz_submitted = False
