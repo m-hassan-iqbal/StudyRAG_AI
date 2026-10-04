@@ -2,8 +2,7 @@
 Subject-Aware AI University Learning Assistant
 Main Streamlit Application.
 Provides subject management, document processing, persistent FAISS indexing,
-hybrid retrieval RAG chat, deep conceptual explanations, a 10-question timed quiz,
-and original document reader.
+hybrid retrieval RAG chat, deep conceptual explanations, and a 10-question timed quiz.
 """
 
 import os
@@ -80,65 +79,233 @@ import streamlit.components.v1 as components
 
 
 # ==============================================================================
-# CUSTOM STYLING
+# CUSTOM STYLING (MODERN SOLID BLACK UI / UX)
 # ==============================================================================
 st.markdown("""
 <style>
+    /* Global Solid Black Core */
+    .stApp {
+        background-color: #000000 !important;
+        color: #f1f5f9 !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    
+    /* Top Header Bar */
+    [data-testid="stHeader"] {
+        background-color: rgba(0, 0, 0, 0.85) !important;
+        backdrop-filter: blur(12px) !important;
+        border-bottom: 1px solid #171923 !important;
+    }
+
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background-color: #050608 !important;
+        border-right: 1px solid #1a1e2e !important;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: #1a1e2e !important;
+    }
+
+    /* Modern Obsidian Header Banner */
     .main-header {
-        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-        color: white;
-        padding: 1.5rem 2rem;
-        border-radius: 0.75rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        background: linear-gradient(135deg, #090d16 0%, #030712 50%, #0d1322 100%);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 1rem;
+        padding: 2rem 2.5rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        position: relative;
+        overflow: hidden;
+    }
+    .main-header::after {
+        content: "";
+        position: absolute;
+        top: -50%;
+        right: -20%;
+        width: 300px;
+        height: 300px;
+        background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, transparent 70%);
+        pointer-events: none;
     }
     .main-header h1 {
-        color: white !important;
-        font-size: 2rem;
-        margin: 0;
-        font-weight: 700;
+        background: linear-gradient(135deg, #ffffff 20%, #93c5fd 60%, #60a5fa 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 2.3rem !important;
+        margin: 0 !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.02em;
     }
     .main-header p {
-        color: #dbeafe;
-        margin: 0.25rem 0 0 0;
-        font-size: 1rem;
+        color: #94a3b8 !important;
+        margin: 0.6rem 0 0 0 !important;
+        font-size: 1.05rem;
+        font-weight: 400;
     }
+    .header-badge {
+        display: inline-block;
+        background: rgba(59, 130, 246, 0.12);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin-bottom: 0.6rem;
+    }
+
+    /* Modern Dashboard Stat Cards */
     .stat-card {
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 0.5rem;
-        padding: 1rem;
+        background: #08090f;
+        border: 1px solid #1b2133;
+        border-radius: 0.85rem;
+        padding: 1.25rem 1rem;
         text-align: center;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .stat-card:hover {
+        transform: translateY(-3px);
+        border-color: #3b82f6;
+        box-shadow: 0 6px 24px rgba(59, 130, 246, 0.2);
     }
     .stat-number {
-        font-size: 1.75rem;
-        font-weight: 700;
-        color: #1e40af;
+        font-size: 2rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        line-height: 1.2;
     }
     .stat-label {
-        font-size: 0.85rem;
-        color: #64748b;
+        font-size: 0.8rem;
+        color: #94a3b8;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.08em;
+        margin-top: 0.35rem;
+        font-weight: 600;
     }
-    .source-box {
-        background-color: #f1f5f9;
-        border-left: 4px solid #3b82f6;
-        padding: 0.75rem 1rem;
-        margin-bottom: 0.75rem;
-        border-radius: 0 0.375rem 0.375rem 0;
+
+    /* Tabs Navigation Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #07080e;
+        padding: 6px 8px;
+        border-radius: 0.75rem;
+        border: 1px solid #1a2035;
+        margin-bottom: 1.5rem;
     }
-    .quiz-timer-box {
-        background-color: #fee2e2;
-        border: 2px solid #ef4444;
-        color: #991b1b;
-        padding: 0.75rem;
+    .stTabs [data-baseweb="tab"] {
         border-radius: 0.5rem;
-        font-size: 1.25rem;
-        font-weight: 700;
+        color: #94a3b8 !important;
+        font-weight: 600;
+        padding: 8px 18px;
+        transition: all 0.2s ease;
+        border: 1px solid transparent;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #f1f5f9 !important;
+        background: rgba(255, 255, 255, 0.04);
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(99, 102, 241, 0.2) 100%) !important;
+        color: #60a5fa !important;
+        border: 1px solid rgba(59, 130, 246, 0.45) !important;
+        box-shadow: 0 2px 10px rgba(59, 130, 246, 0.2);
+    }
+
+    /* Buttons */
+    .stButton > button {
+        border-radius: 0.6rem;
+        font-weight: 600;
+        transition: all 0.2s ease;
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+        border: 1px solid #3b82f6 !important;
+        color: #ffffff !important;
+        box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+    }
+    .stButton > button[kind="primary"]:hover {
+        box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        transform: translateY(-1px);
+    }
+    .stButton > button[kind="secondary"] {
+        background-color: #0c0e17 !important;
+        border: 1px solid #1f273d !important;
+        color: #cbd5e1 !important;
+    }
+    .stButton > button[kind="secondary"]:hover {
+        border-color: #3b82f6 !important;
+        color: #ffffff !important;
+    }
+
+    /* Cards and Expanders */
+    .streamlit-expanderHeader {
+        background-color: #080910 !important;
+        border: 1px solid #1a2035 !important;
+        border-radius: 0.6rem !important;
+        color: #f1f5f9 !important;
+    }
+    .streamlit-expanderContent {
+        background-color: #05060b !important;
+        border: 1px solid #1a2035 !important;
+        border-top: none !important;
+        border-radius: 0 0 0.6rem 0.6rem !important;
+    }
+
+    /* Sources citation block */
+    .source-box {
+        background-color: #070912;
+        border-left: 3px solid #3b82f6;
+        border-top: 1px solid #141b2e;
+        border-right: 1px solid #141b2e;
+        border-bottom: 1px solid #141b2e;
+        padding: 0.85rem 1.1rem;
+        margin-bottom: 0.85rem;
+        border-radius: 0 0.5rem 0.5rem 0;
+    }
+
+    /* Result Dashboard Card */
+    .quiz-result-card {
+        background: linear-gradient(135deg, #090e1a 0%, #04060c 100%);
+        border: 2px solid #3b82f6;
+        border-radius: 1rem;
+        padding: 2.2rem 1.5rem;
         text-align: center;
-        margin-bottom: 1rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 10px 35px rgba(59, 130, 246, 0.25);
+    }
+
+    /* Custom Form & Input styles */
+    .stTextInput input, .stSelectbox select, div[data-baseweb="select"] > div {
+        background-color: #080a12 !important;
+        border-color: #1e263d !important;
+        color: #f1f5f9 !important;
+    }
+    .stTextInput input:focus, div[data-baseweb="select"] > div:focus-within {
+        border-color: #3b82f6 !important;
+        box-shadow: 0 0 0 1px #3b82f6 !important;
+    }
+
+    /* Chat message container styling */
+    [data-testid="stChatMessage"] {
+        background-color: #070911 !important;
+        border: 1px solid #151a2b !important;
+        border-radius: 0.75rem !important;
+        margin-bottom: 1rem !important;
+        padding: 1rem 1.25rem !important;
+    }
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background-color: #0b0f1e !important;
+        border-color: #1d2745 !important;
+    }
+
+    /* Custom horizontal dividers */
+    hr {
+        border-color: #171c2d !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -183,7 +350,14 @@ except Exception as e:
 # ==============================================================================
 # SIDEBAR: SUBJECT SELECTION & MANAGEMENT
 # ==============================================================================
-st.sidebar.title("📚 Subject Management")
+st.sidebar.markdown("""
+<div style="padding: 0.5rem 0 1rem 0;">
+    <span style="font-size: 1.3rem; font-weight: 800; color: #f8fafc; display: flex; align-items: center; gap: 8px;">
+        📚 Knowledge Hub
+    </span>
+    <span style="font-size: 0.8rem; color: #64748b;">Autonomous Course Agent</span>
+</div>
+""", unsafe_allow_html=True)
 
 # API Key check
 api_key = get_groq_api_key()
@@ -284,8 +458,9 @@ if st.session_state.selected_subject_id:
 # ==============================================================================
 st.markdown("""
 <div class="main-header">
+    <div class="header-badge">⚡ Autonomous Academic Intelligence</div>
     <h1>🎓 AI University Learning Assistant</h1>
-    <p>Your Course Material. Your Knowledge Base. Your AI Tutor.</p>
+    <p>Your Course Material • Grounded Knowledge Base • 5-Minute Conceptual Mastery</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -322,7 +497,7 @@ with col3:
 with col4:
     st.markdown(f"""
     <div class="stat-card">
-        <div class="stat-number" style="font-size:1.1rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{active_sub_name}</div>
+        <div class="stat-number" style="font-size:1.15rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#38bdf8;">{active_sub_name}</div>
         <div class="stat-label">Active Subject</div>
     </div>
     """, unsafe_allow_html=True)
@@ -349,8 +524,8 @@ with tab_kb:
         sub_name = current_sub["display_name"]
         sub_id = current_sub["subject_id"]
 
-        st.subheader(f"📘 Subject: {sub_name}")
-        st.caption("Upload lecture slides (PDF), notes (DOCX), or reading materials (TXT) to build this subject's private knowledge base.")
+        st.subheader(f"📘 Subject Knowledge Base: {sub_name}")
+        st.caption("Upload lecture slides (PDF), notes (DOCX), or reading materials (TXT) to build this subject's private vector index.")
 
         # Document Upload Component
         uploaded_files = st.file_uploader(
@@ -445,7 +620,7 @@ with tab_kb:
         st.divider()
 
         # Existing Documents Section
-        st.subheader("📑 Documents in this Subject")
+        st.subheader("📑 Preserved Documents in this Subject")
         registry = load_registry(sub_id)
         docs = registry.get("documents", {})
 
@@ -455,7 +630,7 @@ with tab_kb:
             for doc_id, meta in list(docs.items()):
                 c_name, c_chunks, c_date, c_action = st.columns([3, 1, 2, 1])
                 with c_name:
-                    st.markdown(f"**{meta.get('filename', 'Unknown')}**")
+                    st.markdown(f"📄 **{meta.get('filename', 'Unknown')}**")
                 with c_chunks:
                     st.markdown(f"`{meta.get('num_chunks', 0)} chunks`")
                 with c_date:
@@ -483,7 +658,7 @@ with tab_chat:
         sub_id = current_sub["subject_id"]
 
         st.subheader(f"🤖 AI Study Assistant — {sub_name}")
-        st.caption("Ask questions about your uploaded materials. The assistant retrieves knowledge ONLY from this subject.")
+        st.caption("Ask questions about your course materials. The assistant retrieves knowledge exclusively from this subject's index.")
 
         # Check if subject has an index
         sub_stats = get_subject_stats(sub_id)
@@ -619,14 +794,17 @@ with tab_quiz:
         sub_id = current_sub["subject_id"]
         sub_stats = get_subject_stats(sub_id)
 
-        st.subheader(f"📝 Timed Conceptual Quiz — {sub_name}")
+        st.subheader(f"📝 Timed Conceptual Assessment — {sub_name}")
         st.markdown("""
-        **Format:**
-        * **10 Real-World & Conceptual Questions** (Multiple Choice)
-        * **10 Marks** (1 mark per question — Score out of 10)
-        * **5 Minutes** fixed countdown timer
-        * **Deep Conceptual Understanding:** Scenario-based questions that test practical trade-offs, analytical problem-solving, and in-depth mastery of your course material.
-        """)
+        <div style="background:#080a13; border: 1px solid #1c2338; border-radius: 0.75rem; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem;">
+            <div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: center;">
+                <div style="color: #60a5fa; font-weight: 700;">🎯 10 Real-World Conceptual MCQs</div>
+                <div style="color: #34d399; font-weight: 700;">🏆 10 Marks (Score out of 10)</div>
+                <div style="color: #f87171; font-weight: 700;">⏱ 5 Minutes Fixed Timer</div>
+                <div style="color: #c084fc; font-weight: 700;">🧠 Scenario-Based Problem Solving</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
         if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
             st.warning("Please upload course documents before generating a quiz.", icon="⚠️")
@@ -640,6 +818,7 @@ with tab_quiz:
                         with st.spinner(f"Synthesizing 10 real-world conceptual MCQs from {sub_name} materials..."):
                             # Collect sample representative chunks from the subject for quiz context
                             all_chunks = load_all_subject_chunks(sub_id)
+                            # Take up to 15 chunks to fit comfortably within prompt
                             sample_text = "\n\n".join([f"Topic excerpt from {c['filename']}:\n{c['text']}" for c in all_chunks[:15]])
                             
                             try:
@@ -662,11 +841,11 @@ with tab_quiz:
                     col_time, col_reset = st.columns([3, 1])
                     with col_time:
                         timer_component = f"""
-                        <div style="background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-                                    border: 2px solid #ef4444; color: #991b1b; padding: 10px 16px;
-                                    border-radius: 8px; font-size: 20px; font-weight: 800; text-align: center;
+                        <div style="background: linear-gradient(135deg, #180808 0%, #0d0404 100%);
+                                    border: 2px solid #ef4444; color: #f87171; padding: 12px 18px;
+                                    border-radius: 10px; font-size: 22px; font-weight: 800; text-align: center;
                                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                                    box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
+                                    box-shadow: 0 0 20px rgba(239, 68, 68, 0.25);">
                             ⏱ <span id="countdown">{format_remaining_time(remaining_sec)}</span> remaining
                         </div>
                         <script>
@@ -675,7 +854,7 @@ with tab_quiz:
                             function updateTimer() {{
                                 if (secondsLeft <= 0) {{
                                     timerDisplay.innerText = "00:00 (TIME UP!)";
-                                    timerDisplay.style.color = "#7f1d1d";
+                                    timerDisplay.style.color = "#dc2626";
                                     try {{
                                         var btns = window.parent.document.querySelectorAll('button');
                                         for (var i = 0; i < btns.length; i++) {{
@@ -696,7 +875,7 @@ with tab_quiz:
                             setInterval(updateTimer, 1000);
                         </script>
                         """
-                        components.html(timer_component, height=60)
+                        components.html(timer_component, height=65)
                     with col_reset:
                         if st.button("Cancel Quiz", use_container_width=True):
                             reset_quiz()
@@ -711,6 +890,7 @@ with tab_quiz:
                             st.markdown(f"**{q['question']}**")
 
                             opts = q["options"]
+                            # Format radio choices
                             choice_labels = [
                                 f"A) {opts.get('A', '')}",
                                 f"B) {opts.get('B', '')}",
@@ -750,18 +930,23 @@ with tab_quiz:
                 pct = int((score / total) * 100) if total > 0 else 0
 
                 perf_label = "Needs Improvement"
+                perf_color = "#f87171"
                 if score >= 9:
                     perf_label = "🌟 Excellent Mastery"
+                    perf_color = "#34d399"
                 elif score >= 7:
                     perf_label = "👍 Good Understanding"
+                    perf_color = "#60a5fa"
                 elif score >= 5:
                     perf_label = "📖 Average — Review Recommended"
+                    perf_color = "#fbbf24"
 
                 st.markdown(f"""
-                <div style="background-color: #f8fafc; border: 2px solid #3b82f6; border-radius: 0.75rem; padding: 1.5rem; text-align: center; margin-bottom: 1.5rem;">
-                    <h2 style="margin: 0; color: #1e3a8a;">QUIZ RESULT: {sub_name}</h2>
-                    <h1 style="font-size: 3rem; margin: 0.5rem 0; color: #2563eb;">{score} / {total}</h1>
-                    <p style="font-size: 1.1rem; color: #475569; margin: 0;">Performance: <strong>{perf_label}</strong> ({pct}%)</p>
+                <div class="quiz-result-card">
+                    <span style="text-transform: uppercase; letter-spacing: 0.1em; color: #94a3b8; font-size: 0.85rem; font-weight: 700;">Quiz Performance Assessment</span>
+                    <h2 style="margin: 0.5rem 0; color: #ffffff; font-size: 1.6rem;">{sub_name}</h2>
+                    <h1 style="font-size: 3.5rem; margin: 0.5rem 0; font-weight: 900; background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">{score} / {total}</h1>
+                    <p style="font-size: 1.15rem; color: #cbd5e1; margin: 0;">Performance: <strong style="color: {perf_color};">{perf_label}</strong> ({pct}%)</p>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -810,7 +995,7 @@ with tab_quiz:
 
 
 # ==============================================================================
-# TAB 4: READ DOCUMENTS (ORIGINAL FORM VIEWER & MEMORY)
+# TAB 4: READ DOCUMENTS (ORIGINAL FORM VIEWER & PERMANENT MEMORY)
 # ==============================================================================
 with tab_read:
     if not st.session_state.selected_subject_id:
@@ -821,7 +1006,7 @@ with tab_read:
         sub_id = current_sub["subject_id"]
 
         st.subheader(f"📖 Read Documents — {sub_name}")
-        st.caption("Read and study your course materials in their original form (PDF, DOCX, TXT). Uploaded documents and chunks are permanently preserved across refreshes.")
+        st.caption("Read and study course materials in their original layout (PDF, DOCX, TXT). Uploaded materials and chunks persist across page refreshes until explicitly deleted.")
 
         registry = load_registry(sub_id)
         docs = registry.get("documents", {})
@@ -871,7 +1056,7 @@ with tab_read:
 
             st.divider()
 
-            # --- 1. PDF VIEWER (MOZILLA PDF.JS CANVAS - NO CHROME BLOCKING) ---
+            # --- 1. PDF VIEWER (ORIGINAL FORM) ---
             if ext == ".pdf":
                 if raw_bytes:
                     c_btn, c_mode = st.columns([1, 2])
@@ -905,38 +1090,38 @@ with tab_read:
                             * {{ box-sizing: border-box; }}
                             body {{
                               margin: 0; padding: 0;
-                              background: #334155;
+                              background: #000000;
                               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                               display: flex; flex-direction: column;
                               height: 100vh; overflow: hidden;
                             }}
                             #toolbar {{
-                              background: #1e293b;
+                              background: #090b12;
                               color: #f8fafc;
                               display: flex; align-items: center; justify-content: center;
                               gap: 12px; padding: 10px 16px;
-                              border-bottom: 2px solid #0f172a;
+                              border-bottom: 1px solid #1a2035;
                               flex-shrink: 0;
                               flex-wrap: wrap;
                             }}
                             .t-btn {{
-                              background: #3b82f6; border: none; color: white;
+                              background: #2563eb; border: 1px solid #3b82f6; color: white;
                               padding: 6px 14px; border-radius: 6px; cursor: pointer;
                               font-size: 13px; font-weight: 600;
-                              transition: background 0.15s ease;
+                              transition: all 0.15s ease;
                             }}
-                            .t-btn:hover {{ background: #2563eb; }}
-                            .t-btn:disabled {{ background: #64748b; cursor: not-allowed; opacity: 0.6; }}
-                            .badge {{ font-size: 14px; font-weight: 500; color: #e2e8f0; }}
+                            .t-btn:hover {{ background: #1d4ed8; }}
+                            .t-btn:disabled {{ background: #1e2438; border-color: #2a334d; cursor: not-allowed; opacity: 0.5; }}
+                            .badge {{ font-size: 14px; font-weight: 600; color: #cbd5e1; }}
                             #viewer-container {{
                               flex: 1; overflow: auto;
                               display: flex; justify-content: center; align-items: flex-start;
-                              padding: 20px;
-                              background: #475569;
+                              padding: 24px;
+                              background: #040508;
                             }}
                             #pdf-canvas {{
-                              box-shadow: 0 10px 25px -5px rgba(0,0,0,0.4);
-                              border-radius: 4px;
+                              box-shadow: 0 10px 35px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.08);
+                              border-radius: 6px;
                               background: white;
                               max-width: 100%;
                             }}
@@ -945,13 +1130,13 @@ with tab_read:
                         <body>
                           <div id="toolbar">
                             <button class="t-btn" id="prev-page">◀ Prev</button>
-                            <span class="badge">Page <span id="page-num">1</span> of <span id="page-count">-</span></span>
+                            <span class="badge">Page <span id="page-num" style="color:#60a5fa;">1</span> of <span id="page-count">-</span></span>
                             <button class="t-btn" id="next-page">Next ▶</button>
-                            <span style="border-left: 1px solid #475569; height: 18px; margin: 0 4px;"></span>
-                            <button class="t-btn" id="zoom-out" style="background:#475569;">🔍 -</button>
+                            <span style="border-left: 1px solid #1e263d; height: 18px; margin: 0 6px;"></span>
+                            <button class="t-btn" id="zoom-out" style="background:#131828; border-color:#242e4c;">🔍 -</button>
                             <span id="zoom-pct" class="badge">100%</span>
-                            <button class="t-btn" id="zoom-in" style="background:#475569;">🔍 +</button>
-                            <button class="t-btn" id="fit-page" style="background:#0284c7;">Fit Width</button>
+                            <button class="t-btn" id="zoom-in" style="background:#131828; border-color:#242e4c;">🔍 +</button>
+                            <button class="t-btn" id="fit-page" style="background:#0284c7; border-color:#38bdf8;">Fit Width</button>
                           </div>
                           <div id="viewer-container">
                             <canvas id="pdf-canvas"></canvas>
@@ -1049,7 +1234,7 @@ with tab_read:
                             }}).catch(function(err) {{
                               console.error("PDF loading error:", err);
                               document.getElementById('viewer-container').innerHTML = 
-                                '<div style="color:white;text-align:center;padding:40px;"><h3>Unable to render PDF preview</h3><p>' + err.message + '</p></div>';
+                                '<div style="color:#f87171;text-align:center;padding:40px;"><h3>Unable to render PDF preview</h3><p>' + err.message + '</p></div>';
                             }});
                           </script>
                         </body>
@@ -1058,7 +1243,7 @@ with tab_read:
                         components.html(pdf_js_html, height=850)
 
                     else:
-                        # Formatted Text Reader
+                        # Formatted Text Reader in Elegant Dark Academic Mode
                         chunks = load_document_chunks(sub_id, selected_doc_id)
                         if chunks:
                             current_page = None
@@ -1069,7 +1254,7 @@ with tab_read:
                                     p_label = f"Page {current_page}" if current_page else "General Content"
                                     st.markdown(f"#### 📄 {p_label}")
                                     st.markdown(f"""
-                                    <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; margin-bottom: 1.5rem;">
+                                    <div style="background-color: #080a12; border: 1px solid #1a2035; border-radius: 8px; padding: 1.6rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.85; color: #e2e8f0; margin-bottom: 1.5rem; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
                                         {('<br><br>'.join(page_text_acc)).replace(chr(10), '<br>')}
                                     </div>
                                     """, unsafe_allow_html=True)
@@ -1080,7 +1265,7 @@ with tab_read:
                                 p_label = f"Page {current_page}" if current_page else "General Content"
                                 st.markdown(f"#### 📄 {p_label}")
                                 st.markdown(f"""
-                                <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; margin-bottom: 1.5rem;">
+                                <div style="background-color: #080a12; border: 1px solid #1a2035; border-radius: 8px; padding: 1.6rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.85; color: #e2e8f0; margin-bottom: 1.5rem; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
                                     {('<br><br>'.join(page_text_acc)).replace(chr(10), '<br>')}
                                 </div>
                                 """, unsafe_allow_html=True)
@@ -1108,11 +1293,12 @@ with tab_read:
                         )
                     st.write("")
 
+                    # Extract full original document text
                     try:
                         extracted = extract_document(raw_bytes, filename)
                         full_docx_text = "\n\n".join([page_info["text"] for page_info in extracted])
                         st.markdown("""
-                        <div style="background-color: #ffffff; border: 2px solid #cbd5e1; border-radius: 8px; padding: 2rem; max-height: 800px; overflow-y: auto; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                        <div style="background-color: #080a12; border: 1px solid #1a2035; border-radius: 8px; padding: 2rem; max-height: 800px; overflow-y: auto; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.85; color: #e2e8f0; box-shadow: 0 6px 20px rgba(0,0,0,0.6);">
                         """ + full_docx_text.replace('\n', '<br>') + """
                         </div>
                         """, unsafe_allow_html=True)
