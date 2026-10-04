@@ -486,190 +486,231 @@ with tab_chat:
         st.caption("Ask questions about your uploaded materials. The assistant retrieves knowledge ONLY from this subject.")
 
         # Check if subject has an index
-        all_chunks = load_all_subject_chunks(sub_id)
-        if not all_chunks:
-            st.warning(f"⚠️ No documents have been processed for '{sub_name}' yet.\nPlease upload course documents in the **Knowledge Base** tab first.")
-        else:
-            # Display conversation history
-            for msg in st.session_state.chat_history:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-                    if msg.get("sources"):
-                        with st.expander("📚 Retrieved Source References"):
-                            for s in msg["sources"]:
-                                page_str = f", Page {s['page']}" if s.get('page') else ""
-                                st.markdown(f"""
-                                <div class="source-box">
-                                    <strong>Document:</strong> {s['filename']}{page_str}<br>
-                                    <small><strong>Score:</strong> {s['score']:.3f} | <strong>Match:</strong> {s['match_type'].capitalize()}</small><br>
-                                    <em>"{s['text_snippet']}"</em>
-                                </div>
-                                """, unsafe_allow_html=True)
+        sub_stats = get_subject_stats(sub_id)
+        if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
+            st.warning(
+                f"The subject **{sub_name}** does not have any processed course documents yet. "
+                "Please upload documents in the **Knowledge Base & Upload** tab first.",
+                icon="⚠️"
+            )
 
-            # Chat input
-            user_question = st.chat_input(f"Ask a question about {sub_name}...")
+        # Display Chat History
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("sources"):
+                    with st.expander("📚 View Retrieved Sources"):
+                        for idx, src in enumerate(msg["sources"], 1):
+                            page_disp = src.get('page') if src.get('page') is not None else 'N/A'
+                            st.markdown(f"**Source {idx}:** `{src.get('filename')}` — Page: `{page_disp}`")
+                            st.caption(f"Scores: Hybrid: {src.get('hybrid_score', 0):.2f} | Semantic: {src.get('semantic_score', 0):.2f} | Keyword: {src.get('keyword_score', 0):.2f}")
+                            st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
 
-            if user_question:
-                # Add user query to history
-                st.session_state.chat_history.append({"role": "user", "content": user_question})
+        # Chat Input
+        user_query = st.chat_input(f"Ask a question about {sub_name}...")
+
+        if user_query:
+            if not api_key:
+                st.error("Cannot query AI: GROQ_API_KEY is not configured.")
+            elif not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
+                st.error("Please upload and process course documents before asking questions.")
+            else:
+                # Add user message to UI
+                st.session_state.chat_history.append({"role": "user", "content": user_query})
                 with st.chat_message("user"):
-                    st.markdown(user_question)
+                    st.markdown(user_query)
 
+                # Execute RAG Pipeline
                 with st.chat_message("assistant"):
                     with st.spinner(f"Searching {sub_name} knowledge base..."):
-                        # Execute hybrid search
-                        retrieved = hybrid_search(
+                        # 1. Hybrid Search (Semantic + Keyword)
+                        retrieved_chunks, is_confident = hybrid_search(
+                            query=user_query,
                             subject_id=sub_id,
-                            query=user_question,
                             top_k=DEFAULT_TOP_K,
                             semantic_weight=DEFAULT_SEMANTIC_WEIGHT,
-                            keyword_weight=DEFAULT_KEYWORD_WEIGHT
+                            keyword_weight=DEFAULT_KEYWORD_WEIGHT,
+                            confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD
                         )
 
-                        # Build formatted context
-                        context_text, sources = build_context(retrieved)
+                        # 2. Context Construction
+                        context_str = build_context(retrieved_chunks)
 
                         # Save for deep explanation
-                        st.session_state.last_query = user_question
-                        st.session_state.last_context = context_text
-
-                        # Generate grounded LLM response
-                        answer = generate_rag_answer(
-                            query=user_question,
-                            context=context_text,
-                            subject_name=sub_name
-                        )
-
-                        st.session_state.last_answer = answer
+                        st.session_state.last_query = user_query
+                        st.session_state.last_context = context_str
                         st.session_state.deep_explanation = None
 
+                        # 3. LLM Generation
+                        try:
+                            answer = generate_rag_answer(
+                                question=user_query,
+                                subject_name=sub_name,
+                                retrieved_context=context_str,
+                                is_confident=is_confident,
+                                chat_history=st.session_state.chat_history[:-1]
+                            )
+                        except Exception as e:
+                            answer = f"Error communicating with AI tutor: {str(e)}"
+
+                        st.session_state.last_answer = answer
+
+                        # Display Answer
                         st.markdown(answer)
 
-                        if sources:
-                            with st.expander("📚 Retrieved Source References"):
-                                for s in sources:
-                                    page_str = f", Page {s['page']}" if s.get('page') else ""
-                                    st.markdown(f"""
-                                    <div class="source-box">
-                                        <strong>Document:</strong> {s['filename']}{page_str}<br>
-                                        <small><strong>Score:</strong> {s['score']:.3f} | <strong>Match:</strong> {s['match_type'].capitalize()}</small><br>
-                                        <em>"{s['text_snippet']}"</em>
-                                    </div>
-                                    """, unsafe_allow_html=True)
+                        # Display Sources
+                        if retrieved_chunks and is_confident:
+                            with st.expander("📚 Sources & References"):
+                                for idx, src in enumerate(retrieved_chunks, 1):
+                                    page_info = src.get('page') if src.get('page') is not None else 'N/A'
+                                    st.markdown(f"**{idx}. {src.get('filename')}** — Page: `{page_info}`")
+                                    st.caption(
+                                        f"Relevance: Hybrid: {src.get('hybrid_score', 0):.2f} | "
+                                        f"Semantic: {src.get('semantic_score', 0):.2f} | "
+                                        f"Keyword: {src.get('keyword_score', 0):.2f}"
+                                    )
+                                    st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
 
+                        # Store in history
                         st.session_state.chat_history.append({
                             "role": "assistant",
                             "content": answer,
-                            "sources": sources
+                            "sources": retrieved_chunks if is_confident else []
                         })
 
-            # Deep Conceptual Explanation Feature
-            if st.session_state.last_answer and st.session_state.last_query:
-                st.write("")
-                st.divider()
-                col_exp1, col_exp2 = st.columns([3, 1])
-                with col_exp1:
-                    st.markdown(f"**Want a deeper breakdown of:** *\"{st.session_state.last_query}\"*?")
-                    st.caption("Expands on underlying principles, step-by-step intuition, mental models, and academic examples.")
-                with col_exp2:
-                    if st.button("🧠 Request Deep Explanation", type="secondary"):
-                        with st.spinner("Synthesizing deep conceptual tutorial..."):
+        # Deep Explanation & Quiz Shortcuts if an answer was produced
+        if st.session_state.last_answer and not st.session_state.last_answer.startswith("I couldn't find enough"):
+            st.divider()
+            c_exp, c_quiz, _ = st.columns([1.5, 1.5, 3])
+            
+            with c_exp:
+                if st.button("🧠 Explain Deeper", use_container_width=True):
+                    with st.spinner("Generating conceptual pedagogical breakdown..."):
+                        try:
                             deep_exp = generate_deep_explanation(
-                                query=st.session_state.last_query,
-                                previous_answer=st.session_state.last_answer,
-                                context=st.session_state.last_context,
-                                subject_name=sub_name
+                                question=st.session_state.last_query,
+                                subject_name=sub_name,
+                                retrieved_context=st.session_state.last_context,
+                                initial_answer=st.session_state.last_answer
                             )
                             st.session_state.deep_explanation = deep_exp
+                        except Exception as e:
+                            st.error(f"Failed to generate deep explanation: {str(e)}")
 
-                if st.session_state.deep_explanation:
-                    st.info(f"### 💡 In-Depth Conceptual Explanation\n\n{st.session_state.deep_explanation}")
+            with c_quiz:
+                if st.button("📝 Test My Knowledge on this Subject", use_container_width=True):
+                    st.info("Head over to the **Conceptual Quiz (10 MCQs)** tab to start your 5-minute assessment!")
+
+            # Display Deep Explanation if generated
+            if st.session_state.deep_explanation:
+                st.markdown("### 🧠 In-Depth Conceptual Explanation")
+                st.markdown(st.session_state.deep_explanation)
 
 
 # ==============================================================================
-# TAB 3: CONCEPTUAL MCQ QUIZ (10 QUESTIONS WITH LIVE TIMER & FEEDBACK)
+# TAB 3: TIMED CONCEPTUAL MCQ QUIZ (10 QUESTIONS | 10 MARKS | 5 MINUTES)
 # ==============================================================================
 with tab_quiz:
     if not st.session_state.selected_subject_id:
-        st.info("👈 Please create or select an academic subject in the sidebar to generate a quiz.")
+        st.info("👈 Please create or select an academic subject in the sidebar to start a quiz.")
     else:
         current_sub = subject_dict.get(st.session_state.selected_subject_id)
         sub_name = current_sub["display_name"]
         sub_id = current_sub["subject_id"]
+        sub_stats = get_subject_stats(sub_id)
 
         st.subheader(f"📝 Timed Conceptual Quiz — {sub_name}")
-        st.caption("10 challenging conceptual MCQs grounded strictly in your uploaded course materials.")
+        st.markdown("""
+        **Format:**
+        * **10 Real-World & Conceptual Questions** (Multiple Choice)
+        * **10 Marks** (1 mark per question — Score out of 10)
+        * **5 Minutes** fixed countdown timer
+        * **Deep Conceptual Understanding:** Scenario-based questions that test practical trade-offs, analytical problem-solving, and in-depth mastery of your course material.
+        """)
 
-        all_chunks = load_all_subject_chunks(sub_id)
-        if not all_chunks:
-            st.warning(f"⚠️ No documents have been processed for '{sub_name}' yet.\nPlease upload lecture materials first to generate a quiz.")
+        if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
+            st.warning("Please upload course documents before generating a quiz.", icon="⚠️")
         else:
-            # Quiz is NOT active and NOT submitted: Show Quiz Generation Screen
+            # Quiz is NOT currently active and not yet submitted
             if not st.session_state.quiz_active and not st.session_state.quiz_submitted:
-                st.markdown(f"""
-                ### Quiz Details:
-                * **Subject:** `{sub_name}`
-                * **Question Count:** `10 Multiple Choice Questions (MCQs)`
-                * **Time Limit:** `5 Minutes` (300 seconds)
-                * **Format:** Real-world problem scenarios, algorithmic trade-offs, and conceptual mastery.
-                """)
+                if st.button("🚀 Start 5-Minute Quiz", type="primary"):
+                    if not api_key:
+                        st.error("Cannot generate quiz: GROQ_API_KEY is not configured.")
+                    else:
+                        with st.spinner(f"Synthesizing 10 real-world conceptual MCQs from {sub_name} materials..."):
+                            # Collect sample representative chunks from the subject for quiz context
+                            all_chunks = load_all_subject_chunks(sub_id)
+                            sample_text = "\n\n".join([f"Topic excerpt from {c['filename']}:\n{c['text']}" for c in all_chunks[:15]])
+                            
+                            try:
+                                questions = generate_quiz(subject_name=sub_name, subject_context=sample_text)
+                                start_quiz(sub_id, sub_name, questions)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error generating quiz: {str(e)}")
 
-                if st.button("🚀 Generate & Start 10-Question Quiz", type="primary"):
-                    with st.spinner("Reading course documents and crafting 10 deep conceptual questions..."):
-                        quiz_data = generate_quiz(
-                            chunks=all_chunks,
-                            subject_name=sub_name,
-                            num_questions=QUIZ_QUESTION_COUNT
-                        )
-
-                        if quiz_data and "questions" in quiz_data and len(quiz_data["questions"]) > 0:
-                            start_quiz(quiz_data["questions"])
-                            st.rerun()
-                        else:
-                            st.error("Failed to generate quiz questions. Please verify your Groq API key and course documents.")
-
-            # Quiz IS ACTIVE: Show Timer & Question Form
+            # Quiz IS currently active
             elif st.session_state.quiz_active and not st.session_state.quiz_submitted:
-                rem_sec = get_remaining_seconds()
+                # Timer evaluation
+                remaining_sec = get_remaining_seconds()
 
-                # JavaScript Live Countdown Timer
-                timer_html = f"""
-                <div style="background-color: #fee2e2; border: 2px solid #ef4444; border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 12px; font-family: monospace;">
-                    <span style="font-size: 16px; font-weight: bold; color: #991b1b;">⏱️ REMAINING TIME: </span>
-                    <span id="countdown_clock" style="font-size: 24px; font-weight: 800; color: #dc2626;">{format_remaining_time(rem_sec)}</span>
-                </div>
-                <script>
-                    var secondsLeft = {rem_sec};
-                    var clockEl = document.getElementById("countdown_clock");
-                    var countdownInterval = setInterval(function() {{
-                        secondsLeft--;
-                        if (secondsLeft <= 0) {{
-                            clearInterval(countdownInterval);
-                            clockEl.innerText = "00:00 (TIME EXPIRED)";
-                            clockEl.style.color = "#7f1d1d";
-                            window.parent.postMessage({{type: "streamlit:setComponentValue", value: "timeout"}}, "*");
-                        }} else {{
-                            var mins = Math.floor(secondsLeft / 60);
-                            var secs = secondsLeft % 60;
-                            clockEl.innerText = (mins < 10 ? "0" : "") + mins + ":" + (secs < 10 ? "0" : "") + secs;
-                        }}
-                    }}, 1000);
-                </script>
-                """
-                components.html(timer_html, height=75)
-
-                if rem_sec <= 0:
-                    st.warning("⚠️ Time has expired! Submitting your answers automatically...")
+                if remaining_sec <= 0:
+                    st.warning("⏰ Time is up! Automatically submitting your answers.")
                     submit_quiz()
                     st.rerun()
                 else:
-                    st.progress((300 - rem_sec) / 300)
+                    col_time, col_reset = st.columns([3, 1])
+                    with col_time:
+                        timer_component = f"""
+                        <div style="background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+                                    border: 2px solid #ef4444; color: #991b1b; padding: 10px 16px;
+                                    border-radius: 8px; font-size: 20px; font-weight: 800; text-align: center;
+                                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                                    box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
+                            ⏱ <span id="countdown">{format_remaining_time(remaining_sec)}</span> remaining
+                        </div>
+                        <script>
+                            var secondsLeft = {remaining_sec};
+                            var timerDisplay = document.getElementById("countdown");
+                            function updateTimer() {{
+                                if (secondsLeft <= 0) {{
+                                    timerDisplay.innerText = "00:00 (TIME UP!)";
+                                    timerDisplay.style.color = "#7f1d1d";
+                                    try {{
+                                        var btns = window.parent.document.querySelectorAll('button');
+                                        for (var i = 0; i < btns.length; i++) {{
+                                            if (btns[i].innerText && btns[i].innerText.includes("Submit Quiz")) {{
+                                                btns[i].click();
+                                                break;
+                                            }}
+                                        }}
+                                    }} catch(e) {{}}
+                                    return;
+                                }}
+                                var m = Math.floor(secondsLeft / 60);
+                                var s = secondsLeft % 60;
+                                timerDisplay.innerText = (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+                                secondsLeft--;
+                            }}
+                            updateTimer();
+                            setInterval(updateTimer, 1000);
+                        </script>
+                        """
+                        components.html(timer_component, height=60)
+                    with col_reset:
+                        if st.button("Cancel Quiz", use_container_width=True):
+                            reset_quiz()
+                            st.rerun()
 
-                    with st.form("quiz_submission_form"):
-                        for idx, q in enumerate(st.session_state.quiz_questions):
-                            st.markdown(f"#### Question {idx+1}: {q.get('question')}")
-                            opts = q.get("options", {})
-                            
+                    # Render questions
+                    questions = st.session_state.quiz_questions
+                    
+                    with st.form("quiz_form"):
+                        for idx, q in enumerate(questions):
+                            st.markdown(f"**Question {idx+1} of 10**")
+                            st.markdown(f"**{q['question']}**")
+
+                            opts = q["options"]
                             choice_labels = [
                                 f"A) {opts.get('A', '')}",
                                 f"B) {opts.get('B', '')}",
@@ -830,10 +871,10 @@ with tab_read:
 
             st.divider()
 
-            # --- 1. PDF VIEWER (ORIGINAL FORM) ---
+            # --- 1. PDF VIEWER (MOZILLA PDF.JS CANVAS - NO CHROME BLOCKING) ---
             if ext == ".pdf":
                 if raw_bytes:
-                    c_btn, _ = st.columns([2, 5])
+                    c_btn, c_mode = st.columns([1, 2])
                     with c_btn:
                         st.download_button(
                             label="📥 Download Original PDF",
@@ -842,21 +883,182 @@ with tab_read:
                             mime="application/pdf",
                             use_container_width=True
                         )
+                    with c_mode:
+                        read_mode = st.radio(
+                            "Display Mode:",
+                            options=["🖥️ Visual PDF Viewer", "📖 Formatted Text Reader"],
+                            horizontal=True,
+                            key=f"pdf_mode_{selected_doc_id}",
+                            label_visibility="collapsed"
+                        )
                     st.write("")
-                    
-                    # Embedded PDF viewer using Base64 iframe
-                    b64_pdf = base64.b64encode(raw_bytes).decode('utf-8')
-                    pdf_display = f'''
-                    <div style="border: 2px solid #cbd5e1; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-                        <iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" width="100%" height="800px" type="application/pdf">
-                            <p>Your browser does not support inline PDF viewing. Please use the download button above.</p>
-                        </iframe>
-                    </div>
-                    '''
-                    st.markdown(pdf_display, unsafe_allow_html=True)
 
-                    # Also provide expandable page-by-page view for convenience
-                    with st.expander("📑 Structured Text View (Page by Page)", expanded=False):
+                    if read_mode == "🖥️ Visual PDF Viewer":
+                        b64_pdf = base64.b64encode(raw_bytes).decode("utf-8")
+                        pdf_js_html = f"""
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                          <meta charset="utf-8">
+                          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+                          <style>
+                            * {{ box-sizing: border-box; }}
+                            body {{
+                              margin: 0; padding: 0;
+                              background: #334155;
+                              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                              display: flex; flex-direction: column;
+                              height: 100vh; overflow: hidden;
+                            }}
+                            #toolbar {{
+                              background: #1e293b;
+                              color: #f8fafc;
+                              display: flex; align-items: center; justify-content: center;
+                              gap: 12px; padding: 10px 16px;
+                              border-bottom: 2px solid #0f172a;
+                              flex-shrink: 0;
+                              flex-wrap: wrap;
+                            }}
+                            .t-btn {{
+                              background: #3b82f6; border: none; color: white;
+                              padding: 6px 14px; border-radius: 6px; cursor: pointer;
+                              font-size: 13px; font-weight: 600;
+                              transition: background 0.15s ease;
+                            }}
+                            .t-btn:hover {{ background: #2563eb; }}
+                            .t-btn:disabled {{ background: #64748b; cursor: not-allowed; opacity: 0.6; }}
+                            .badge {{ font-size: 14px; font-weight: 500; color: #e2e8f0; }}
+                            #viewer-container {{
+                              flex: 1; overflow: auto;
+                              display: flex; justify-content: center; align-items: flex-start;
+                              padding: 20px;
+                              background: #475569;
+                            }}
+                            #pdf-canvas {{
+                              box-shadow: 0 10px 25px -5px rgba(0,0,0,0.4);
+                              border-radius: 4px;
+                              background: white;
+                              max-width: 100%;
+                            }}
+                          </style>
+                        </head>
+                        <body>
+                          <div id="toolbar">
+                            <button class="t-btn" id="prev-page">◀ Prev</button>
+                            <span class="badge">Page <span id="page-num">1</span> of <span id="page-count">-</span></span>
+                            <button class="t-btn" id="next-page">Next ▶</button>
+                            <span style="border-left: 1px solid #475569; height: 18px; margin: 0 4px;"></span>
+                            <button class="t-btn" id="zoom-out" style="background:#475569;">🔍 -</button>
+                            <span id="zoom-pct" class="badge">100%</span>
+                            <button class="t-btn" id="zoom-in" style="background:#475569;">🔍 +</button>
+                            <button class="t-btn" id="fit-page" style="background:#0284c7;">Fit Width</button>
+                          </div>
+                          <div id="viewer-container">
+                            <canvas id="pdf-canvas"></canvas>
+                          </div>
+
+                          <script>
+                            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+                            var pdfData = atob("{b64_pdf}");
+                            var uint8Array = new Uint8Array(pdfData.length);
+                            for (var i = 0; i < pdfData.length; i++) {{
+                              uint8Array[i] = pdfData.charCodeAt(i);
+                            }}
+
+                            var pdfDoc = null,
+                                pageNum = 1,
+                                pageRendering = false,
+                                pageNumPending = null,
+                                scale = 1.25,
+                                canvas = document.getElementById('pdf-canvas'),
+                                ctx = canvas.getContext('2d');
+
+                            function renderPage(num) {{
+                              pageRendering = true;
+                              pdfDoc.getPage(num).then(function(page) {{
+                                var viewport = page.getViewport({{ scale: scale }});
+                                canvas.height = viewport.height;
+                                canvas.width = viewport.width;
+
+                                var renderContext = {{
+                                  canvasContext: ctx,
+                                  viewport: viewport
+                                }};
+                                var renderTask = page.render(renderContext);
+
+                                renderTask.promise.then(function() {{
+                                  pageRendering = false;
+                                  if (pageNumPending !== null) {{
+                                    renderPage(pageNumPending);
+                                    pageNumPending = null;
+                                  }}
+                                }});
+                              }});
+
+                              document.getElementById('page-num').textContent = num;
+                              document.getElementById('prev-page').disabled = (num <= 1);
+                              document.getElementById('next-page').disabled = (num >= pdfDoc.numPages);
+                              document.getElementById('zoom-pct').textContent = Math.round(scale * 100) + '%';
+                            }}
+
+                            function queueRenderPage(num) {{
+                              if (pageRendering) {{
+                                pageNumPending = num;
+                              }} else {{
+                                renderPage(num);
+                              }}
+                            }}
+
+                            document.getElementById('prev-page').onclick = function() {{
+                              if (pageNum <= 1) return;
+                              pageNum--;
+                              queueRenderPage(pageNum);
+                            }};
+
+                            document.getElementById('next-page').onclick = function() {{
+                              if (pageNum >= pdfDoc.numPages) return;
+                              pageNum++;
+                              queueRenderPage(pageNum);
+                            }};
+
+                            document.getElementById('zoom-in').onclick = function() {{
+                              scale = Math.min(3.0, scale + 0.2);
+                              queueRenderPage(pageNum);
+                            }};
+
+                            document.getElementById('zoom-out').onclick = function() {{
+                              scale = Math.max(0.5, scale - 0.2);
+                              queueRenderPage(pageNum);
+                            }};
+
+                            document.getElementById('fit-page').onclick = function() {{
+                              var container = document.getElementById('viewer-container');
+                              var availableWidth = container.clientWidth - 50;
+                              pdfDoc.getPage(pageNum).then(function(page) {{
+                                var unscaledViewport = page.getViewport({{ scale: 1.0 }});
+                                scale = Math.max(0.5, availableWidth / unscaledViewport.width);
+                                queueRenderPage(pageNum);
+                              }});
+                            }};
+
+                            pdfjsLib.getDocument({{ data: uint8Array }}).promise.then(function(doc) {{
+                              pdfDoc = doc;
+                              document.getElementById('page-count').textContent = doc.numPages;
+                              renderPage(pageNum);
+                            }}).catch(function(err) {{
+                              console.error("PDF loading error:", err);
+                              document.getElementById('viewer-container').innerHTML = 
+                                '<div style="color:white;text-align:center;padding:40px;"><h3>Unable to render PDF preview</h3><p>' + err.message + '</p></div>';
+                            }});
+                          </script>
+                        </body>
+                        </html>
+                        """
+                        components.html(pdf_js_html, height=850)
+
+                    else:
+                        # Formatted Text Reader
                         chunks = load_document_chunks(sub_id, selected_doc_id)
                         if chunks:
                             current_page = None
@@ -866,17 +1068,25 @@ with tab_read:
                                 if p != current_page and page_text_acc:
                                     p_label = f"Page {current_page}" if current_page else "General Content"
                                     st.markdown(f"#### 📄 {p_label}")
-                                    st.markdown("\n\n".join(page_text_acc))
-                                    st.divider()
+                                    st.markdown(f"""
+                                    <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; margin-bottom: 1.5rem;">
+                                        {('<br><br>'.join(page_text_acc)).replace(chr(10), '<br>')}
+                                    </div>
+                                    """, unsafe_allow_html=True)
                                     page_text_acc = []
                                 current_page = p
                                 page_text_acc.append(c.get('text', ''))
                             if page_text_acc:
                                 p_label = f"Page {current_page}" if current_page else "General Content"
                                 st.markdown(f"#### 📄 {p_label}")
-                                st.markdown("\n\n".join(page_text_acc))
+                                st.markdown(f"""
+                                <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; font-family: 'Georgia', serif; font-size: 1.05rem; line-height: 1.8; color: #1e293b; margin-bottom: 1.5rem;">
+                                    {('<br><br>'.join(page_text_acc)).replace(chr(10), '<br>')}
+                                </div>
+                                """, unsafe_allow_html=True)
                         else:
-                            st.caption("No chunks available.")
+                            st.info("No chunk text available for this document.")
+
                 else:
                     st.warning("Original raw PDF is not on disk. Displaying preserved chunk text:")
                     chunks = load_document_chunks(sub_id, selected_doc_id)
@@ -898,7 +1108,6 @@ with tab_read:
                         )
                     st.write("")
 
-                    # Extract full original document text
                     try:
                         extracted = extract_document(raw_bytes, filename)
                         full_docx_text = "\n\n".join([page_info["text"] for page_info in extracted])
