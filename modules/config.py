@@ -30,10 +30,10 @@ DEFAULT_KEYWORD_WEIGHT = 0.30
 DEFAULT_TOP_K = 5
 DEFAULT_CONFIDENCE_THRESHOLD = 0.28  # Cosine similarity threshold for normalized vectors
 
-# Quiz Settings
+# Quiz Settings (5-minute timer, 10 marks)
 QUIZ_QUESTION_COUNT = 10
 QUIZ_TOTAL_MARKS = 10
-QUIZ_TIME_LIMIT_SECONDS = 600  # 10 minutes
+QUIZ_TIME_LIMIT_SECONDS = 300  # 5 minutes fixed timer
 
 
 def normalize_subject_id(display_name: str) -> str:
