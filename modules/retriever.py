@@ -17,7 +17,7 @@ from modules.config import (
 from modules.indexer import load_subject_index, generate_embeddings, get_embedding_model
 from modules.storage import load_all_subject_chunks
 
-# Lightweight set of common English stopwords
+# Lightweight set of common English stopwords to avoid uninformative keyword matching
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
     "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
@@ -51,15 +51,18 @@ def semantic_search(query: str, subject_id: str, top_k: int = 8) -> List[Dict[st
     if not query:
         return []
 
+    # Embed and normalize query vector
     query_emb = generate_embeddings([query])
     actual_k = min(top_k, len(chunk_map))
     
+    # Search FAISS index
     scores, indices = index.search(query_emb, actual_k)
     
     results = []
     for score, idx in zip(scores[0], indices[0]):
         if 0 <= idx < len(chunk_map):
             chunk = dict(chunk_map[idx])
+            # Bound cosine similarity score between 0.0 and 1.0 for practical ranking
             chunk["semantic_score"] = max(0.0, min(1.0, float(score)))
             results.append(chunk)
 
@@ -75,6 +78,7 @@ def keyword_search(query: str, subject_id: str, top_k: int = 8) -> List[Dict[str
     if not chunks:
         return []
 
+    # Clean and filter query tokens
     query_words = [
         w.lower() for w in re.findall(r"\w+", query)
         if len(w) > 1 and w.lower() not in STOP_WORDS
@@ -95,12 +99,15 @@ def keyword_search(query: str, subject_id: str, top_k: int = 8) -> List[Dict[str
         chunk_words = re.findall(r"\w+", text)
         chunk_word_set = set(chunk_words)
 
+        # Count matched terms
         matched_terms = sum(1 for term in unique_query_words if term in chunk_word_set)
         term_coverage = matched_terms / total_query_terms if total_query_terms > 0 else 0.0
 
+        # Frequency bonus
         term_freq = sum(chunk_words.count(term) for term in unique_query_words)
         freq_factor = min(1.0, term_freq / (len(unique_query_words) * 3))
 
+        # Combined keyword score between 0.0 and 1.0
         kw_score = 0.7 * term_coverage + 0.3 * freq_factor
 
         if kw_score > 0.05:
@@ -124,11 +131,15 @@ def hybrid_search(
     Merges semantic search and keyword search within the selected subject.
     Normalizes weights and calculates hybrid_score:
         hybrid_score = (semantic_weight * semantic_score) + (keyword_weight * keyword_score)
+    
+    Returns:
+        (sorted_chunks, is_confident)
     """
     total_w = semantic_weight + keyword_weight
     w_sem = semantic_weight / total_w if total_w > 0 else 0.7
     w_kw = keyword_weight / total_w if total_w > 0 else 0.3
 
+    # Retrieve candidates from both methods
     semantic_results = semantic_search(query, subject_id, top_k=top_k * 2)
     keyword_results = keyword_search(query, subject_id, top_k=top_k * 2)
 
@@ -147,6 +158,7 @@ def hybrid_search(
             merged[cid] = dict(item)
             merged[cid]["semantic_score"] = 0.0
 
+    # Compute hybrid scores
     scored_list = []
     for item in merged.values():
         s_score = item.get("semantic_score", 0.0)
@@ -156,9 +168,11 @@ def hybrid_search(
         item["hybrid_score"] = round(h_score, 4)
         scored_list.append(item)
 
+    # Sort descending by hybrid_score
     scored_list.sort(key=lambda x: x["hybrid_score"], reverse=True)
     top_chunks = scored_list[:top_k]
 
+    # Evaluate retrieval confidence
     is_confident = False
     if top_chunks:
         best_score = top_chunks[0]["hybrid_score"]
@@ -168,21 +182,87 @@ def hybrid_search(
     return top_chunks, is_confident
 
 
-def build_context(retrieved_chunks: List[Dict[str, Any]]) -> str:
+class ContextResult(str):
+    """
+    A smart string that holds the formatted LLM context, but can also be
+    unpacked as `(context_text, sources)` to support both:
+        context_str = build_context(retrieved)
+    and:
+        context_text, sources = build_context(retrieved)
+    """
+    def __new__(cls, context_str: str, sources: Optional[List[Dict[str, Any]]] = None):
+        instance = super().__new__(cls, context_str)
+        instance.sources = sources if sources is not None else []
+        return instance
+
+    def __iter__(self):
+        # Enables dual unpacking: context_text, sources = build_context(...)
+        yield str(self)
+        yield self.sources
+
+    def __getitem__(self, index):
+        if isinstance(index, int):
+            if index == 0:
+                return str(self)
+            elif index == 1:
+                return self.sources
+            raise IndexError("ContextResult index out of range")
+        return super().__getitem__(index)
+
+
+def build_context(retrieved_input: Any) -> ContextResult:
     """
     Builds structured, transparent context blocks for the LLM prompt.
     Includes document name, real page number (or N/A), chunk ID, and text.
+    
+    Robustly handles:
+      - A list of chunk dictionaries: [chunk1, chunk2, ...]
+      - A tuple returned by hybrid_search: (top_chunks, is_confident)
+      - A single chunk dictionary
+    
+    Returns a ContextResult which can be:
+      - Used directly as a string: `context_str = build_context(retrieved)`
+      - Unpacked into (context_text, sources): `context_text, sources = build_context(retrieved)`
+      - Accessed for sources list: `context_str.sources`
     """
-    if not retrieved_chunks:
-        return "No relevant course material found."
+    raw_chunks: List[Dict[str, Any]] = []
+
+    if isinstance(retrieved_input, tuple):
+        # Case 1: Result from hybrid_search(query, ...) -> (top_chunks, is_confident)
+        if len(retrieved_input) > 0 and isinstance(retrieved_input[0], list):
+            raw_chunks = retrieved_input[0]
+        else:
+            for item in retrieved_input:
+                if isinstance(item, list):
+                    raw_chunks.extend([x for x in item if isinstance(x, dict)])
+                elif isinstance(item, dict):
+                    raw_chunks.append(item)
+    elif isinstance(retrieved_input, list):
+        # Case 2: List of chunks, or nested list [[chunk1, chunk2]]
+        for item in retrieved_input:
+            if isinstance(item, dict):
+                raw_chunks.append(item)
+            elif isinstance(item, list):
+                raw_chunks.extend([x for x in item if isinstance(x, dict)])
+    elif isinstance(retrieved_input, dict):
+        raw_chunks = [retrieved_input]
+    else:
+        raw_chunks = []
+
+    if not raw_chunks:
+        return ContextResult("No relevant course material found.", [])
 
     context_parts = []
-    for idx, chunk in enumerate(retrieved_chunks, 1):
+    sources_list = []
+
+    for idx, chunk in enumerate(raw_chunks, 1):
+        if not isinstance(chunk, dict):
+            continue
         filename = chunk.get("filename", "Unknown")
         page = chunk.get("page")
         page_str = str(page) if page is not None else "N/A"
-        chunk_id = chunk.get("chunk_id", "N/A")
-        text = chunk.get("text", "").strip()
+        chunk_id = chunk.get("chunk_id", f"chunk_{idx}")
+        text = str(chunk.get("text", "")).strip()
 
         block = (
             f"SOURCE {idx}\n"
@@ -193,4 +273,20 @@ def build_context(retrieved_chunks: List[Dict[str, Any]]) -> str:
         )
         context_parts.append(block)
 
-    return "\n\n──────────────────────────────────────\n\n".join(context_parts)
+        sources_list.append({
+            "index": idx,
+            "filename": filename,
+            "page": page,
+            "page_str": page_str,
+            "chunk_id": chunk_id,
+            "score": float(chunk.get("hybrid_score", chunk.get("semantic_score", 0.0))),
+            "hybrid_score": float(chunk.get("hybrid_score", 0.0)),
+            "semantic_score": float(chunk.get("semantic_score", 0.0)),
+            "keyword_score": float(chunk.get("keyword_score", 0.0)),
+            "match_type": "hybrid" if chunk.get("keyword_score", 0) > 0 and chunk.get("semantic_score", 0) > 0 else ("keyword" if chunk.get("keyword_score", 0) > 0 else "semantic"),
+            "text_snippet": (text[:200] + "...") if len(text) > 200 else text,
+            "text": text,
+        })
+
+    context_str = "\n\n──────────────────────────────────────\n\n".join(context_parts)
+    return ContextResult(context_str, sources_list)
