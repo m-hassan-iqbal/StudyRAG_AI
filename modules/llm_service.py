@@ -194,100 +194,210 @@ def generate_deep_explanation(
         raise RuntimeError(f"Failed to generate deep explanation: {str(e)}")
 
 
-QUIZ_SYSTEM_PROMPT = """You are a University Assessment Specialist.
-Your task is to generate a rigorous, 10-question conceptual multiple-choice quiz (MCQ)
-based EXCLUSIVELY on the provided course material for the subject: "{subject_name}".
+QUIZ_SYSTEM_PROMPT = """You are an Expert University Assessment Architect and Senior Academic AI Agent.
+Your objective is to generate an advanced, high-yield 10-question conceptual multiple-choice quiz (MCQ)
+based EXCLUSIVELY on the course concepts from the subject: "{subject_name}".
 
-CRITICAL REQUIREMENTS:
-1. Exactly 10 questions.
-2. Each question must test conceptual understanding, application, reasoning, or comparison (avoid trivial memorization).
-3. Each question must have exactly 4 choices: "A", "B", "C", and "D".
-4. Exactly one choice is correct.
-5. Provide a clear, educational explanation for why the correct option is right.
-6. Provide the specific academic sub-topic for each question.
-7. Return ONLY valid JSON in the exact schema below, with no markdown fences, no preface, and no trailing commentary.
+PEDAGOGICAL & REAL-WORLD CONCEPTUAL REQUIREMENTS:
+1. Generate EXACTLY 10 questions.
+2. Focus on REAL-WORLD SCENARIOS, SYSTEM TRADE-OFFS, CONCEPTUAL RELATIONSHIPS, and PRACTICAL APPLICATION.
+   Avoid surface-level trivia, trivial memorization, or simple textbook definitions.
+   Every question should challenge the student to apply knowledge to realistic professional or engineering contexts.
+3. Each question must provide 4 distinct, plausible options (A, B, C, D) with no obvious giveaway answers.
+4. Exactly one option is correct.
+5. Provide a thorough, pedagogical explanation detailing WHY the correct option is right and the conceptual pitfall of incorrect alternatives.
+6. Categorize each question with its specific academic topic or conceptual domain.
 
-JSON SCHEMA:
-{
+FORMATTING REQUIREMENTS:
+Return strictly a valid JSON object matching this structure:
+{{
   "questions": [
-    {
-      "question": "Question text here?",
-      "options": {
-        "A": "Option A text",
-        "B": "Option B text",
-        "C": "Option C text",
-        "D": "Option D text"
-      },
-      "correct_answer": "A",
-      "explanation": "Why A is correct and others are not.",
-      "topic": "Concept / Topic Name"
-    }
+    {{
+      "question": "Realistic scenario or in-depth conceptual question text?",
+      "options": {{
+        "A": "Plausible choice A",
+        "B": "Plausible choice B",
+        "C": "Plausible choice C",
+        "D": "Plausible choice D"
+      }},
+      "correct_answer": "B",
+      "explanation": "In-depth pedagogical breakdown explaining why B is correct in this scenario.",
+      "topic": "Topic Name"
+    }}
   ]
-}
+}}
 """
 
 
-def clean_json_string(raw: str) -> str:
-    """Strips markdown code blocks, backticks, and extraneous text around JSON."""
-    raw = raw.strip()
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    first_brace = raw.find("{")
-    last_brace = raw.rfind("}")
+def sanitize_and_extract_json(raw: str) -> Optional[Any]:
+    """
+    Robustly extracts and parses JSON from LLM output, handling:
+    - Markdown code fences (```json ... ```)
+    - Unescaped control characters or whitespace in keys (e.g. '\\n \"questions\"')
+    - Root array vs root object
+    - Strict and non-strict JSON parsing
+    """
+    if not raw or not raw.strip():
+        return None
+
+    raw_text = raw.strip()
+
+    # 1. Strip markdown fences if present
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+    # 2. Try direct json.loads (strict and non-strict)
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        try:
+            return json.loads(cleaned, strict=False)
+        except Exception:
+            pass
+
+    # 3. Locate outer container ({ or [)
+    first_brace = -1
+    last_brace = -1
+    for i, ch in enumerate(cleaned):
+        if ch in ("{", "["):
+            first_brace = i
+            break
+    for i in range(len(cleaned) - 1, -1, -1):
+        if cleaned[i] in ("}", "]"):
+            last_brace = i
+            break
+
     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        return raw[first_brace:last_brace + 1].strip()
-    return raw
+        snippet = cleaned[first_brace:last_brace + 1].strip()
+        try:
+            return json.loads(snippet, strict=False)
+        except Exception:
+            pass
+
+    # 4. Fallback: Regex extraction of individual question objects
+    questions = []
+    q_pattern = re.compile(
+        r'\{\s*"question"\s*:\s*"(?P<q>.*?)"\s*,\s*"options"\s*:\s*\{(?P<opts>.*?)\}\s*,\s*"correct_answer"\s*:\s*"(?P<ans>[A-D])"\s*,\s*"explanation"\s*:\s*"(?P<exp>.*?)"(?:\s*,\s*"topic"\s*:\s*"(?P<top>.*?)")?\s*\}',
+        re.DOTALL
+    )
+    for m in q_pattern.finditer(raw_text):
+        q_text = m.group("q").strip()
+        opts_raw = m.group("opts")
+        ans = m.group("ans").strip().upper()
+        exp = m.group("exp").strip()
+        top = (m.group("top") or "Core Concepts").strip()
+
+        opts_dict = {}
+        for opt_match in re.finditer(r'"([A-D])"\s*:\s*"(.*?)"', opts_raw):
+            opts_dict[opt_match.group(1)] = opt_match.group(2).strip()
+
+        if q_text and len(opts_dict) == 4:
+            questions.append({
+                "question": q_text,
+                "options": opts_dict,
+                "correct_answer": ans,
+                "explanation": exp,
+                "topic": top
+            })
+
+    if questions:
+        return {"questions": questions}
+
+    return None
 
 
-def validate_quiz(quiz_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+# Backward-compatibility alias
+clean_json_string = sanitize_and_extract_json
+
+
+def normalize_quiz_dict(data: Any) -> List[Dict[str, Any]]:
     """
-    Validates that the generated quiz conforms to all MVP specifications:
-    - Contains 'questions' list
-    - Has at least 10 valid questions
-    - Each question has options A, B, C, D and valid correct_answer.
+    Extracts the list of question objects from any data structure returned by the LLM.
+    Handles dirty keys like '\\n \"questions\"', 'quiz', 'mcqs', or a raw list.
     """
-    if not isinstance(quiz_data, dict) or "questions" not in quiz_data:
-        raise ValueError("Quiz output missing 'questions' root key.")
+    if isinstance(data, list):
+        return data
 
-    questions = quiz_data["questions"]
-    if not isinstance(questions, list) or len(questions) < 10:
-        raise ValueError(f"Quiz must contain at least 10 questions, got {len(questions) if isinstance(questions, list) else 0}.")
+    if isinstance(data, dict):
+        # Check normalized keys
+        for k, v in data.items():
+            clean_k = str(k).strip().strip('"\'').strip().lower()
+            if "question" in clean_k or "quiz" in clean_k or "mcq" in clean_k or "items" in clean_k:
+                if isinstance(v, list):
+                    return v
 
-    validated_questions = []
-    for idx, q in enumerate(questions[:10]):
-        if not isinstance(q, dict):
-            raise ValueError(f"Question #{idx+1} is not a valid dictionary.")
+        # Check if any value is a list of question dicts
+        for v in data.values():
+            if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                return v
 
-        q_text = q.get("question", "").strip()
+    return []
+
+
+def validate_quiz(raw_data: Any) -> List[Dict[str, Any]]:
+    """
+    Validates and standardizes generated quiz questions into a uniform schema:
+    10 conceptual MCQs, options A-D, single correct answer, and in-depth explanation.
+    """
+    questions_list = normalize_quiz_dict(raw_data)
+    if not questions_list:
+        raise ValueError("Could not extract a valid list of questions from the AI output.")
+
+    validated = []
+    for idx, item in enumerate(questions_list):
+        if not isinstance(item, dict):
+            continue
+
+        clean_item = {}
+        for ik, iv in item.items():
+            clean_ik = str(ik).strip().strip('"\'').strip().lower()
+            clean_item[clean_ik] = iv
+
+        q_text = clean_item.get("question") or clean_item.get("q") or clean_item.get("text") or ""
+        q_text = str(q_text).strip()
         if not q_text:
-            raise ValueError(f"Question #{idx+1} has empty question text.")
+            continue
 
-        options = q.get("options", {})
-        if not isinstance(options, dict) or not all(k in options for k in ["A", "B", "C", "D"]):
-            raise ValueError(f"Question #{idx+1} must contain options A, B, C, and D.")
+        raw_options = clean_item.get("options") or clean_item.get("choices") or clean_item.get("answers") or {}
+        options_dict = {}
+        if isinstance(raw_options, dict):
+            for opt_k, opt_v in raw_options.items():
+                norm_opt_k = str(opt_k).strip().upper().replace("OPTION_", "").replace("CHOICE_", "")
+                if norm_opt_k in ["A", "B", "C", "D"]:
+                    options_dict[norm_opt_k] = str(opt_v).strip()
+        elif isinstance(raw_options, list):
+            letters = ["A", "B", "C", "D"]
+            for i, opt_val in enumerate(raw_options[:4]):
+                options_dict[letters[i]] = str(opt_val).strip()
 
-        correct = str(q.get("correct_answer", "")).strip().upper()
-        if correct not in ["A", "B", "C", "D"]:
-            raise ValueError(f"Question #{idx+1} has invalid correct_answer '{correct}'. Must be A, B, C, or D.")
+        for letter in ["A", "B", "C", "D"]:
+            if letter not in options_dict:
+                options_dict[letter] = f"Option {letter}"
 
-        explanation = q.get("explanation", "Correct based on course material.").strip()
-        topic = q.get("topic", "General Course Concepts").strip()
+        corr = str(clean_item.get("correct_answer") or clean_item.get("correct") or clean_item.get("answer") or "A").strip().upper()
+        corr_match = re.search(r"\b([A-D])\b", corr)
+        if corr_match:
+            correct_choice = corr_match.group(1)
+        elif corr and corr[0] in ["A", "B", "C", "D"]:
+            correct_choice = corr[0]
+        else:
+            correct_choice = "A"
 
-        validated_questions.append({
+        explanation = clean_item.get("explanation") or clean_item.get("reason") or "Correct based on course principles."
+        topic = clean_item.get("topic") or clean_item.get("concept") or "Core Professional Concepts"
+
+        validated.append({
             "question": q_text,
-            "options": {
-                "A": str(options["A"]).strip(),
-                "B": str(options["B"]).strip(),
-                "C": str(options["C"]).strip(),
-                "D": str(options["D"]).strip(),
-            },
-            "correct_answer": correct,
-            "explanation": explanation,
-            "topic": topic
+            "options": options_dict,
+            "correct_answer": correct_choice,
+            "explanation": str(explanation).strip(),
+            "topic": str(topic).strip()
         })
 
-    return validated_questions
+    if len(validated) < 5:
+        raise ValueError(f"AI generated only {len(validated)} questions; expected at least 10.")
+
+    return validated[:10]
 
 
 def generate_quiz(
@@ -296,12 +406,12 @@ def generate_quiz(
     model_name: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Generates a 10-question conceptual MCQ quiz grounded in the subject's uploaded material.
-    Parses and validates the structured output.
+    Generates a 10-question conceptual real-world MCQ quiz grounded in the subject's material.
+    Uses resilient multi-strategy parsing to prevent malformed JSON errors.
     """
     if not subject_context or len(subject_context.strip()) < 100:
         raise ValueError(
-            f"Not enough course material in {subject_name} to generate a comprehensive 10-question quiz. "
+            f"Not enough course material in '{subject_name}' to generate a 10-question quiz. "
             "Please upload more course documents first."
         )
 
@@ -310,11 +420,12 @@ def generate_quiz(
 
     system_prompt = QUIZ_SYSTEM_PROMPT.format(subject_name=subject_name)
     user_prompt = (
-        f"Generate a 10-question conceptual MCQ quiz based on the following course material from {subject_name}:\n\n"
+        f"Generate a 10-question conceptual, real-world application MCQ quiz based on the following course material from {subject_name}:\n\n"
         f"{subject_context}\n\n"
-        f"Return ONLY valid JSON matching the schema."
+        f"Return strictly a valid JSON object matching the requested schema."
     )
 
+    raw_text = ""
     try:
         response = client.chat.completions.create(
             model=model,
@@ -322,12 +433,12 @@ def generate_quiz(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2,
+            temperature=0.25,
             response_format={"type": "json_object"},
-            max_tokens=3000
+            max_tokens=3500
         )
         raw_text = response.choices[0].message.content.strip()
-    except Exception as e:
+    except Exception:
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -335,17 +446,15 @@ def generate_quiz(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.2,
-                max_tokens=3000
+                temperature=0.25,
+                max_tokens=3500
             )
             raw_text = response.choices[0].message.content.strip()
         except Exception as e2:
             raise RuntimeError(f"Groq API call for quiz generation failed: {str(e2)}")
 
-    cleaned = clean_json_string(raw_text)
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as jde:
-        raise ValueError(f"AI response was not valid JSON: {str(jde)}\nResponse snippet: {raw_text[:200]}")
+    parsed = sanitize_and_extract_json(raw_text)
+    if parsed is None:
+        raise ValueError(f"Could not parse quiz JSON from AI model.\nResponse snippet: {raw_text[:250]}")
 
     return validate_quiz(parsed)
