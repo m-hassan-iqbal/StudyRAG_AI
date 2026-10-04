@@ -7,7 +7,7 @@ and structured 10-question quiz generation with strict JSON validation.
 import os
 import json
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from groq import Groq
 
 from modules.config import DEFAULT_GROQ_MODEL
@@ -74,18 +74,30 @@ Rules:
 
 
 def generate_rag_answer(
-    question: str,
-    subject_name: str,
-    retrieved_context: str,
-    is_confident: bool,
+    question: str = "",
+    subject_name: str = "",
+    retrieved_context: str = "",
+    is_confident: bool = True,
     chat_history: Optional[List[Dict[str, str]]] = None,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    query: Optional[str] = None,
+    context: Optional[str] = None,
+    **kwargs
 ) -> str:
     """
     Generates a course-grounded answer to a student question using Groq LLM.
     If retrieval confidence is low, refuses to hallucinate and provides clear honest guidance.
+    Supports both (question, retrieved_context) and (query, context) keyword parameters.
     """
-    if not is_confident or not retrieved_context.strip() or retrieved_context == "No relevant course material found.":
+    # Gracefully accept parameter aliases
+    if not question and query:
+        question = query
+    if not retrieved_context and context:
+        retrieved_context = context
+
+    context_str = str(retrieved_context).strip() if retrieved_context else ""
+
+    if not is_confident or not context_str or context_str == "No relevant course material found.":
         return (
             f"I couldn't find enough information about this topic in your uploaded **{subject_name}** materials.\n\n"
             f"*Tip: Make sure lecture slides, notes, or readings covering this concept have been uploaded and processed under this subject.*"
@@ -95,8 +107,10 @@ def generate_rag_answer(
     model = model_name or get_groq_model()
 
     system_content = RAG_SYSTEM_PROMPT.format(subject_name=subject_name)
+
     messages = [{"role": "system", "content": system_content}]
 
+    # Include recent conversational context if present (last 2 turns)
     if chat_history:
         for turn in chat_history[-4:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -104,7 +118,7 @@ def generate_rag_answer(
     user_prompt = (
         f"STUDENT QUESTION:\n{question}\n\n"
         f"RETRIEVED COURSE MATERIAL FROM {subject_name.upper()}:\n"
-        f"{retrieved_context}\n\n"
+        f"{context_str}\n\n"
         f"Provide a clear, grounded academic answer based exclusively on the material above."
     )
     messages.append({"role": "user", "content": user_prompt})
@@ -158,15 +172,28 @@ Structure your response clearly using the following markdown headers:
 
 
 def generate_deep_explanation(
-    question: str,
-    subject_name: str,
-    retrieved_context: str,
-    initial_answer: str,
-    model_name: Optional[str] = None
+    question: str = "",
+    subject_name: str = "",
+    retrieved_context: str = "",
+    initial_answer: str = "",
+    model_name: Optional[str] = None,
+    query: Optional[str] = None,
+    previous_answer: Optional[str] = None,
+    context: Optional[str] = None,
+    **kwargs
 ) -> str:
     """
     Generates an in-depth conceptual breakdown adapted for university students.
+    Supports both (question, initial_answer, retrieved_context) and (query, previous_answer, context) parameter aliases.
     """
+    # Resolve aliases
+    if not question and query:
+        question = query
+    if not initial_answer and previous_answer:
+        initial_answer = previous_answer
+    if not retrieved_context and context:
+        retrieved_context = context
+
     client = get_groq_client()
     model = model_name or get_groq_model()
 
@@ -174,7 +201,7 @@ def generate_deep_explanation(
         subject_name=subject_name,
         question=question,
         initial_answer=initial_answer,
-        retrieved_context=retrieved_context
+        retrieved_context=str(retrieved_context or "")
     )
 
     messages = [
@@ -227,6 +254,29 @@ Return strictly a valid JSON object matching this structure:
   ]
 }}
 """
+
+
+class QuizResult(list):
+    """
+    A smart list containing validated quiz questions that also supports dictionary-style access.
+    Enables callers to use either:
+      - `questions = generate_quiz(...)` -> `for q in questions: ...`
+      - `quiz_data = generate_quiz(...)` -> `if 'questions' in quiz_data: start_quiz(quiz_data['questions'])`
+    """
+    def __getitem__(self, item):
+        if item == "questions":
+            return list(self)
+        return super().__getitem__(item)
+
+    def __contains__(self, item):
+        if item == "questions":
+            return True
+        return super().__contains__(item)
+
+    def get(self, key, default=None):
+        if key == "questions":
+            return list(self)
+        return default
 
 
 def sanitize_and_extract_json(raw: str) -> Optional[Any]:
@@ -334,10 +384,11 @@ def normalize_quiz_dict(data: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def validate_quiz(raw_data: Any) -> List[Dict[str, Any]]:
+def validate_quiz(raw_data: Any) -> QuizResult:
     """
     Validates and standardizes generated quiz questions into a uniform schema:
     10 conceptual MCQs, options A-D, single correct answer, and in-depth explanation.
+    Returns a QuizResult object that supports both list and dict access.
     """
     questions_list = normalize_quiz_dict(raw_data)
     if not questions_list:
@@ -348,6 +399,7 @@ def validate_quiz(raw_data: Any) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
+        # Clean all keys in the question dictionary
         clean_item = {}
         for ik, iv in item.items():
             clean_ik = str(ik).strip().strip('"\'').strip().lower()
@@ -397,21 +449,30 @@ def validate_quiz(raw_data: Any) -> List[Dict[str, Any]]:
     if len(validated) < 5:
         raise ValueError(f"AI generated only {len(validated)} questions; expected at least 10.")
 
-    return validated[:10]
+    return QuizResult(validated[:10])
 
 
 def generate_quiz(
-    subject_name: str,
-    subject_context: str,
-    model_name: Optional[str] = None
-) -> List[Dict[str, Any]]:
+    subject_name: str = "",
+    subject_context: Optional[str] = None,
+    chunks: Optional[List[Dict[str, Any]]] = None,
+    num_questions: int = 10,
+    model_name: Optional[str] = None,
+    **kwargs
+) -> QuizResult:
     """
     Generates a 10-question conceptual real-world MCQ quiz grounded in the subject's material.
-    Uses resilient multi-strategy parsing to prevent malformed JSON errors.
+    Supports both direct string context (subject_context) and chunks list (chunks).
+    Returns a QuizResult that works as both a List and a Dict ('questions' in quiz_data).
     """
-    if not subject_context or len(subject_context.strip()) < 100:
+    # Reconstruct context from chunks if raw text was not provided
+    if not subject_context and chunks:
+        sample_texts = [c.get("text", "") for c in chunks[:30] if isinstance(c, dict)]
+        subject_context = "\n\n".join(sample_texts)
+
+    if not subject_context or len(subject_context.strip()) < 50:
         raise ValueError(
-            f"Not enough course material in '{subject_name}' to generate a 10-question quiz. "
+            f"Not enough course material in '{subject_name}' to generate a {num_questions}-question quiz. "
             "Please upload more course documents first."
         )
 
@@ -420,12 +481,13 @@ def generate_quiz(
 
     system_prompt = QUIZ_SYSTEM_PROMPT.format(subject_name=subject_name)
     user_prompt = (
-        f"Generate a 10-question conceptual, real-world application MCQ quiz based on the following course material from {subject_name}:\n\n"
-        f"{subject_context}\n\n"
+        f"Generate a {num_questions}-question conceptual, real-world application MCQ quiz based on the following course material from {subject_name}:\n\n"
+        f"{subject_context[:8000]}\n\n"
         f"Return strictly a valid JSON object matching the requested schema."
     )
 
     raw_text = ""
+    # Try with json_object response format
     try:
         response = client.chat.completions.create(
             model=model,
@@ -439,6 +501,7 @@ def generate_quiz(
         )
         raw_text = response.choices[0].message.content.strip()
     except Exception:
+        # Fallback without json_object enforcement
         try:
             response = client.chat.completions.create(
                 model=model,
