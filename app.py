@@ -20,6 +20,7 @@ st.set_page_config(
 
 # Import internal modules
 from modules.config import (
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_SEMANTIC_WEIGHT,
@@ -140,7 +141,7 @@ if "selected_subject_id" not in st.session_state:
     st.session_state.selected_subject_id = None
 
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []  # List of {"role": "...", "content": "...", "sources": [...]}
 
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
@@ -154,6 +155,7 @@ if "last_context" not in st.session_state:
 if "deep_explanation" not in st.session_state:
     st.session_state.deep_explanation = None
 
+# Initialize quiz state
 init_quiz_session_state()
 
 
@@ -183,12 +185,15 @@ else:
         icon="⚠️"
     )
 
+# List all subjects
 subjects = list_subjects()
 subject_dict = {s["subject_id"]: s for s in subjects}
 
+# Subject selection dropdown
 if subjects:
     subject_names = {s["subject_id"]: f"{s['display_name']} ({s['num_documents']} docs)" for s in subjects}
     
+    # Keep current selection valid
     current_id = st.session_state.selected_subject_id
     if current_id not in subject_names:
         current_id = subjects[0]["subject_id"]
@@ -204,6 +209,7 @@ if subjects:
 
     if selected_sub_id != st.session_state.selected_subject_id:
         st.session_state.selected_subject_id = selected_sub_id
+        # Clear chat when switching subjects to maintain subject boundary purity
         st.session_state.chat_history = []
         st.session_state.last_query = ""
         st.session_state.last_answer = ""
@@ -329,6 +335,7 @@ with tab_kb:
         st.subheader(f"📘 Subject: {sub_name}")
         st.caption("Upload lecture slides (PDF), notes (DOCX), or reading materials (TXT) to build this subject's private knowledge base.")
 
+        # Document Upload Component
         uploaded_files = st.file_uploader(
             "Choose course documents (PDF, DOCX, TXT):",
             type=["pdf", "docx", "txt"],
@@ -352,6 +359,7 @@ with tab_kb:
                             st.warning(f"File `{filename}` is empty. Skipping.")
                             continue
 
+                        # Check duplicate hash
                         file_hash = compute_file_hash(file_bytes)
                         existing_doc = is_duplicate_document(sub_id, file_hash)
                         if existing_doc:
@@ -359,6 +367,7 @@ with tab_kb:
                             skipped_count += 1
                             continue
 
+                        # Extract text
                         status.write(f"🔍 Extracting structured text from `{filename}`...")
                         try:
                             extracted = extract_document(file_bytes, filename)
@@ -370,6 +379,7 @@ with tab_kb:
                             st.warning(f"No readable text could be extracted from `{filename}`.")
                             continue
 
+                        # Chunk text
                         doc_id = f"doc_{int(time.time())}_{len(filename)}"
                         status.write(f"✂️ Creating overlapping chunks for `{filename}`...")
                         chunks = create_chunks(
@@ -384,6 +394,7 @@ with tab_kb:
                             st.warning(f"No chunks created for `{filename}`.")
                             continue
 
+                        # Persist chunk JSON and registry
                         save_document_chunks(
                             subject_id=sub_id,
                             document_id=doc_id,
@@ -395,6 +406,7 @@ with tab_kb:
                         processed_count += 1
                         status.write(f"✓ `{filename}` processed into {len(chunks)} chunks.")
 
+                    # Rebuild Subject FAISS Index
                     if processed_count > 0:
                         status.write("⚡ Generating embeddings & updating subject FAISS vector index...")
                         all_chunks = load_all_subject_chunks(sub_id)
@@ -432,6 +444,7 @@ with tab_kb:
                 with c_action:
                     if st.button("Delete", key=f"del_{doc_id}", type="secondary"):
                         delete_document(sub_id, doc_id)
+                        # Rebuild FAISS index with remaining chunks
                         remaining_chunks = load_all_subject_chunks(sub_id)
                         build_and_save_index(sub_id, remaining_chunks)
                         st.success(f"Deleted {meta.get('filename')}")
@@ -452,6 +465,7 @@ with tab_chat:
         st.subheader(f"🤖 AI Study Assistant — {sub_name}")
         st.caption("Ask questions about your uploaded materials. The assistant retrieves knowledge ONLY from this subject.")
 
+        # Check if subject has an index
         sub_stats = get_subject_stats(sub_id)
         if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
             st.warning(
@@ -460,6 +474,7 @@ with tab_chat:
                 icon="⚠️"
             )
 
+        # Display Chat History
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -471,6 +486,7 @@ with tab_chat:
                             st.caption(f"Scores: Hybrid: {src.get('hybrid_score', 0):.2f} | Semantic: {src.get('semantic_score', 0):.2f} | Keyword: {src.get('keyword_score', 0):.2f}")
                             st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
 
+        # Chat Input
         user_query = st.chat_input(f"Ask a question about {sub_name}...")
 
         if user_query:
@@ -479,12 +495,15 @@ with tab_chat:
             elif not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
                 st.error("Please upload and process course documents before asking questions.")
             else:
+                # Add user message to UI
                 st.session_state.chat_history.append({"role": "user", "content": user_query})
                 with st.chat_message("user"):
                     st.markdown(user_query)
 
+                # Execute RAG Pipeline
                 with st.chat_message("assistant"):
                     with st.spinner(f"Searching {sub_name} knowledge base..."):
+                        # 1. Hybrid Search (Semantic + Keyword)
                         retrieved_chunks, is_confident = hybrid_search(
                             query=user_query,
                             subject_id=sub_id,
@@ -494,12 +513,15 @@ with tab_chat:
                             confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD
                         )
 
+                        # 2. Context Construction
                         context_str = build_context(retrieved_chunks)
 
+                        # Save for deep explanation
                         st.session_state.last_query = user_query
                         st.session_state.last_context = context_str
                         st.session_state.deep_explanation = None
 
+                        # 3. LLM Generation
                         try:
                             answer = generate_rag_answer(
                                 question=user_query,
@@ -512,8 +534,11 @@ with tab_chat:
                             answer = f"Error communicating with AI tutor: {str(e)}"
 
                         st.session_state.last_answer = answer
+
+                        # Display Answer
                         st.markdown(answer)
 
+                        # Display Sources
                         if retrieved_chunks and is_confident:
                             with st.expander("📚 Sources & References"):
                                 for idx, src in enumerate(retrieved_chunks, 1):
@@ -526,12 +551,14 @@ with tab_chat:
                                     )
                                     st.text(src.get("text", "")[:350] + ("..." if len(src.get("text", "")) > 350 else ""))
 
+                        # Store in history
                         st.session_state.chat_history.append({
                             "role": "assistant",
                             "content": answer,
                             "sources": retrieved_chunks if is_confident else []
                         })
 
+        # Deep Explanation & Quiz Shortcuts if an answer was produced
         if st.session_state.last_answer and not st.session_state.last_answer.startswith("I couldn't find enough"):
             st.divider()
             c_exp, c_quiz, _ = st.columns([1.5, 1.5, 3])
@@ -552,8 +579,10 @@ with tab_chat:
 
             with c_quiz:
                 if st.button("📝 Test My Knowledge on this Subject", use_container_width=True):
+                    # Trigger quiz tab
                     st.info("Head over to the **Conceptual Quiz (10 MCQs)** tab to start your 10-minute assessment!")
 
+            # Display Deep Explanation if generated
             if st.session_state.deep_explanation:
                 st.markdown("### 🧠 In-Depth Conceptual Explanation")
                 st.markdown(st.session_state.deep_explanation)
@@ -583,13 +612,16 @@ with tab_quiz:
         if not sub_stats["has_index"] or sub_stats["num_chunks"] == 0:
             st.warning("Please upload course documents before generating a quiz.", icon="⚠️")
         else:
+            # Quiz is NOT currently active and not yet submitted
             if not st.session_state.quiz_active and not st.session_state.quiz_submitted:
                 if st.button("🚀 Start 10-Minute Quiz", type="primary"):
                     if not api_key:
                         st.error("Cannot generate quiz: GROQ_API_KEY is not configured.")
                     else:
                         with st.spinner(f"Synthesizing 10 conceptual MCQs from {sub_name} materials..."):
+                            # Collect sample representative chunks from the subject for quiz context
                             all_chunks = load_all_subject_chunks(sub_id)
+                            # Take up to 15 chunks to fit comfortably within prompt
                             sample_text = "\n\n".join([f"Topic excerpt from {c['filename']}:\n{c['text']}" for c in all_chunks[:15]])
                             
                             try:
@@ -599,7 +631,9 @@ with tab_quiz:
                             except Exception as e:
                                 st.error(f"Error generating quiz: {str(e)}")
 
+            # Quiz IS currently active
             elif st.session_state.quiz_active and not st.session_state.quiz_submitted:
+                # Timer evaluation
                 remaining_sec = get_remaining_seconds()
 
                 if remaining_sec <= 0:
@@ -618,6 +652,7 @@ with tab_quiz:
                             reset_quiz()
                             st.rerun()
 
+                    # Render questions
                     questions = st.session_state.quiz_questions
                     
                     with st.form("quiz_form"):
@@ -626,6 +661,7 @@ with tab_quiz:
                             st.markdown(f"**{q['question']}**")
 
                             opts = q["options"]
+                            # Format radio choices
                             choice_labels = [
                                 f"A) {opts.get('A', '')}",
                                 f"B) {opts.get('B', '')}",
@@ -649,7 +685,7 @@ with tab_quiz:
                             )
 
                             if selected_label:
-                                letter = selected_label[0]
+                                letter = selected_label[0]  # 'A', 'B', 'C', or 'D'
                                 st.session_state.quiz_user_answers[idx] = letter
 
                             st.write("")
@@ -659,6 +695,7 @@ with tab_quiz:
                             submit_quiz()
                             st.rerun()
 
+            # Quiz HAS been submitted: Show Results & Detailed Feedback
             elif st.session_state.quiz_submitted:
                 score, total, topics, detailed = calculate_quiz_results()
                 pct = int((score / total) * 100) if total > 0 else 0
@@ -679,6 +716,7 @@ with tab_quiz:
                 </div>
                 """, unsafe_allow_html=True)
 
+                # Recommended Review Topics
                 if topics:
                     st.subheader("🎯 Recommended Review Topics")
                     st.write("Focus on revising the following concepts from your course documents:")
